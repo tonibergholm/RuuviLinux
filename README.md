@@ -4,7 +4,7 @@ An independent, open-source **native Qt desktop app** for RuuviTags on Omarchy /
 
 ![Demo interface with generated sensor readings](docs/demo-preview.png)
 
-*Demo preview; desktop styling follows the Qt environment.*
+*Generated-data demo rendered on Omarchy / Hyprland with its native Qt theme.*
 
 ## MVP features
 
@@ -74,7 +74,7 @@ QT_QPA_PLATFORM=offscreen .venv/bin/ruuvilinux --smoke-test --screenshot /tmp/ru
 
 Tests cover official protocol vectors and unavailable values, every truncated payload length, wrong manufacturers / unsupported formats, history deduplication / retention, name and favorite persistence, XDG paths, failed scanner startup / shutdown, advertisement dispatch, and GUI interactions. GitHub Actions runs these checks on Ubuntu Linux.
 
-A passing simulated test does **not** establish physical BlueZ radio behavior or Hyprland integration. See `VALIDATION.md` for what was executed. Hardware smoke test on Omarchy: discover a real RAWv2 tag, compare readings with Ruuvi Station, rename/favorite, wait for minute samples, relaunch, pause/resume, move out of range, turn Bluetooth off/on, and close while scanning.
+Real RAWv2 discovery and local history have also been verified on an Omarchy / Hyprland machine. See `VALIDATION.md` for exact coverage and remaining checks. Hardware smoke test on Omarchy: discover a real RAWv2 tag, compare readings with Ruuvi Station, rename/favorite, wait for minute samples, relaunch, pause/resume, move out of range, turn Bluetooth off/on, and close while scanning.
 
 ## Protocol and library research
 

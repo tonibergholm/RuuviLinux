@@ -2,3 +2,4 @@ include LICENSE README.md VALIDATION.md
 recursive-include scripts *.sh *.py
 recursive-include packaging *.svg
 recursive-include tests *.py
+recursive-include docs *.png
