@@ -86,3 +86,13 @@ def test_transport_cancel_disconnects():
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(download_session('tag',stop,lambda _:None,LogAccumulator(NOW),scanner_factory=Scanner,client_factory=Client))
     assert events==['unsubscribe','disconnect']
+
+def test_worker_timeout_has_actionable_message(monkeypatch):
+    import ruuvilinux.tag_logs as logs
+    async def timeout(*args,**kwargs): raise TimeoutError()
+    monkeypatch.setattr(logs,'download_session',timeout)
+    worker=logs.LogWorker('tag');results=[]
+    worker.result.connect(lambda samples,error:results.append((samples,error)))
+    worker.run()
+    assert results[0][0]==[]
+    assert 'timed out' in results[0][1] and 'firmware' in results[0][1]

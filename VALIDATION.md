@@ -58,7 +58,7 @@ failure / shutdown paths and do not establish those additional radio behaviors.
 
 ## Tag history v0.3
 
-- All 69 tests passed locally, including the real MQTT broker test. Coverage
+- All 70 tests passed locally, including the real MQTT broker test. Coverage
   includes the official request vector, negative temperature and pressure units,
   missing values, partial/out-of-order fields, duplicate imports and persistence.
 - Fake Bluetooth sessions verify subscribe/request/end-marker/disconnect and
@@ -69,3 +69,10 @@ failure / shutdown paths and do not establish those additional radio behaviors.
   attempt failed on macOS. Onboard historical values remain unverified on
   physical hardware; check range, connectable logging firmware and competing
   connections before repeating. No firmware or tag data was changed.
+
+- Ubuntu CI passed all 69 initial v0.3 tests, demo rendering, installer and
+  package checks: [CI run](https://github.com/tonibergholm/RuuviLinux/actions/runs/37110056745).
+- Omarchy upgraded to v0.3.0; its native Wayland window shows the download
+  button below the chart, and the existing sensor/history database is intact.
+- A follow-up regression test verifies that an empty Bluetooth timeout
+  exception produces a useful message about range, firmware and connections.

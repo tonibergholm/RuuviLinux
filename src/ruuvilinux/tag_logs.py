@@ -124,5 +124,5 @@ class LogWorker(QThread):
         error=''
         try: asyncio.run(run())
         except asyncio.CancelledError: error='Download cancelled.'
-        except Exception as exc: error=f'History download failed: {exc or "Connection or transfer timed out. Bring the tag closer, enable connectable firmware, and close other tag connections."}'
+        except Exception as exc: error=f'History download failed: {str(exc) or "Connection or transfer timed out. Bring the tag closer, enable connectable firmware, and close other tag connections."}'
         self.result.emit(acc.samples(),error)
