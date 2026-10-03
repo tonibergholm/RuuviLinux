@@ -73,7 +73,7 @@ async def download_session(identity, stop, progress, accumulator, adapter=None,
     kwargs={'timeout':15,'disconnected_callback':lambda _:disconnected.set()}
     if adapter: kwargs['adapter']=adapter
     client=client_factory(device,**kwargs)
-    started=False
+    transfer_failed=False; cleanup_issue=''
     try:
         await asyncio.wait_for(client.connect(),20)
         last_packet=time.monotonic(); packet_error=None
@@ -84,7 +84,7 @@ async def download_session(identity, stop, progress, accumulator, adapter=None,
             if len(data)>=3 and data[0]==0x3A and data[2] in (0x10,0xF0):
                 last_packet=time.monotonic()
                 progress(f'Downloading tag history · {len(accumulator.values)} samples')
-        await asyncio.wait_for(client.start_notify(TX,notified),10); started=True
+        await asyncio.wait_for(client.start_notify(TX,notified),10)
         accumulator.now=int(clock()); accumulator.start=max(0,accumulator.now-RETENTION)
         await asyncio.wait_for(client.write_gatt_char(RX,accumulator.request(),response=True),10)
         deadline=time.monotonic()+300
@@ -96,11 +96,19 @@ async def download_session(identity, stop, progress, accumulator, adapter=None,
                 raise TimeoutError('Tag stopped sending history. Check connectable firmware, close other tag connections, and retry.')
             await asyncio.sleep(.1)
         if packet_error: raise packet_error
+    except BaseException:
+        transfer_failed=True
+        raise
     finally:
+        # Disconnect releases this client's notifications too. An explicit
+        # StopNotify can stall on BlueZ after a completed firmware log stream.
         try:
-            if started and client.is_connected: await asyncio.wait_for(client.stop_notify(TX),3)
-        finally:
-            await asyncio.wait_for(client.disconnect(),5)
+            await asyncio.wait_for(client.disconnect(),20)
+        except Exception:
+            if not transfer_failed:
+                if not accumulator.complete: raise
+                cleanup_issue='Download complete. Bluetooth disconnect did not finish; close other tag connections before retrying.'
+    return cleanup_issue
 
 
 class LogWorker(QThread):
@@ -118,11 +126,11 @@ class LogWorker(QThread):
                 while not task.done():
                     if self.stop_event.is_set(): task.cancel();break
                     await asyncio.sleep(.1)
-                await task
+                return await task
             finally:
                 if not task.done(): task.cancel()
         error=''
-        try: asyncio.run(run())
+        try: error=asyncio.run(run()) or ''
         except asyncio.CancelledError: error='Download cancelled.'
         except Exception as exc: error=f'History download failed: {str(exc) or "Connection or transfer timed out. Bring the tag closer, enable connectable firmware, and close other tag connections."}'
         self.result.emit(acc.samples(),error)

@@ -67,7 +67,7 @@ def test_transport_subscribe_write_end_and_cleanup():
     acc=LogAccumulator(NOW)
     asyncio.run(download_session('tag',threading.Event(),lambda _:None,acc,scanner_factory=Scanner,client_factory=Client,clock=lambda:NOW))
     assert TX in events and (RX,acc.request(),True) in events
-    assert events[-2:]==['unsubscribe','disconnect'] and acc.complete
+    assert events[-1:]==['disconnect'] and acc.complete
     assert acc.samples()[0].pressure==1000
 
 def test_transport_cancel_disconnects():
@@ -85,7 +85,7 @@ def test_transport_cancel_disconnects():
         async def disconnect(self):events.append('disconnect')
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(download_session('tag',stop,lambda _:None,LogAccumulator(NOW),scanner_factory=Scanner,client_factory=Client))
-    assert events==['unsubscribe','disconnect']
+    assert events==['disconnect']
 
 def test_worker_timeout_has_actionable_message(monkeypatch):
     import ruuvilinux.tag_logs as logs
@@ -96,3 +96,26 @@ def test_worker_timeout_has_actionable_message(monkeypatch):
     worker.run()
     assert results[0][0]==[]
     assert 'timed out' in results[0][1] and 'firmware' in results[0][1]
+
+@pytest.mark.parametrize('transfer_error',[False,True])
+def test_disconnect_error_preserves_transfer_result(transfer_error):
+    class Scanner:
+        @staticmethod
+        async def find_device_by_filter(*args,**kwargs):return object()
+    class Client:
+        def __init__(self,*args,**kwargs):pass
+        async def connect(self):
+            if transfer_error:raise RuntimeError('Original connection failure')
+        async def start_notify(self,uuid,callback):self.callback=callback
+        async def write_gatt_char(self,*args,**kwargs):
+            self.callback(None,frame(0x30,NOW-300,2400))
+            self.callback(None,bytes.fromhex('3A3A10FFFFFFFFFFFFFFFF'))
+        async def disconnect(self):raise TimeoutError()
+    acc=LogAccumulator(NOW)
+    operation=download_session('tag',threading.Event(),lambda _:None,acc,scanner_factory=Scanner,client_factory=Client,clock=lambda:NOW)
+    if transfer_error:
+        with pytest.raises(RuntimeError,match='Original connection failure'):asyncio.run(operation)
+    else:
+        warning=asyncio.run(operation)
+        assert acc.complete and acc.samples()[0].temperature==24
+        assert warning.startswith('Download complete.') and 'disconnect' in warning

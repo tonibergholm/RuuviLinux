@@ -58,17 +58,20 @@ failure / shutdown paths and do not establish those additional radio behaviors.
 
 ## Tag history v0.3
 
-- All 70 tests passed locally, including the real MQTT broker test. Coverage
+- All 72 tests passed locally, including the real MQTT broker test. Coverage
   includes the official request vector, negative temperature and pressure units,
   missing values, partial/out-of-order fields, duplicate imports and persistence.
 - Fake Bluetooth sessions verify subscribe/request/end-marker/disconnect and
   cancellation cleanup. A Qt test verifies the download action, ten-day chart
   and preservation of the latest live reading.
-- The actual Omarchy Bluetooth adapter discovered the physical tag but its
-  connection timed out before any history was received. The same connection
-  attempt failed on macOS. Onboard historical values remain unverified on
-  physical hardware; check range, connectable logging firmware and competing
-  connections before repeating. No firmware or tag data was changed.
+- After the user released the competing iOS connection, the actual Omarchy
+  native download action succeeded. SQLite retained 1,693 samples spanning
+  5.72 days, all with temperature, humidity and pressure populated. The user
+  confirmed the native button works; existing names and favorites remain.
+- Initial hardware attempts hit connection timeouts, a GATT notification error
+  and a disconnect timeout. The app reports errors and retains partial samples.
+  Standalone test sessions were followed by a successful native GUI transfer;
+  no firmware or tag data was changed.
 
 - Ubuntu CI passed all 69 initial v0.3 tests, demo rendering, installer and
   package checks: [CI run](https://github.com/tonibergholm/RuuviLinux/actions/runs/37110056745).
@@ -76,3 +79,12 @@ failure / shutdown paths and do not establish those additional radio behaviors.
   button below the chart, and the existing sensor/history database is intact.
 - A follow-up regression test verifies that an empty Bluetooth timeout
   exception produces a useful message about range, firmware and connections.
+
+- Follow-up Ubuntu CI passed all 70 tests and packaging/install checks:
+  [CI run](https://github.com/tonibergholm/RuuviLinux/actions/runs/37110281769).
+
+- A complete Omarchy transfer initially displayed a failure because BlueZ
+  notification/disconnect cleanup timed out after all 1,644 samples arrived.
+  Disconnect now releases notifications directly, has a longer bounded wait,
+  and reports cleanup warnings separately from successful transfers. Regression
+  tests cover completed-transfer cleanup and preservation of original errors.
