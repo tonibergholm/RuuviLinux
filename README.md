@@ -11,12 +11,12 @@ An independent, open-source **native Qt desktop app** for RuuviTags on Omarchy /
 - Live BLE discovery using Bleak's BlueZ D-Bus backend. No pairing, Ruuvi account, internet connection, or Gateway needed during use.
 - Temperature, humidity, pressure, voltage, acceleration, movement count, TX power, and signal strength.
 - Saved device names and favorites, favorite filter, and stale-reading indicator.
-- Persistent SQLite history, up to one sample per minute and 1,440 samples per tag. Temperature, humidity, and pressure charts show the last 24 hours, with gaps for missing data / long outages.
+- Persistent SQLite history, up to one sample per minute and 14,400 samples per tag. Temperature, humidity, and pressure charts show the last 24 hours or 10 days, with gaps for missing data / long outages.
 - Pause / resume scanning, actionable Bluetooth error messages, safe asynchronous shutdown.
 - Native desktop launcher for Omarchy's **Super + Space** menu.
 - Demo mode with generated data; demo never accesses your sensor database or Bluetooth.
 
-Supports **RuuviTag RAWv2 / format 5** only in v0.2. Ruuvi Air, legacy formats, cloud sync, alerts, sensor-memory downloads, and firmware updates are outside this release.
+Supports **RuuviTag RAWv2 / format 5** only in v0.3. Ruuvi Air, legacy formats, cloud sync, alerts, firmware updates are outside this release.
 
 ## Install on Omarchy / Arch
 
@@ -62,7 +62,7 @@ Supported input is MQTT 3.1.1 JSON from:
 - [ruuvi-go-gateway](https://github.com/Scrin/ruuvi-go-gateway): the same raw Gateway fields.
 - [RuuviBridge](https://github.com/Scrin/RuuviBridge): `data_format: 5`, `mac`, `timestamp` UNIX seconds, `rssi`, and decoded sensor fields. Bridge pressure in Pa is converted to hPa; voltage remains V and acceleration remains g.
 
-Only RAWv2 / format 5 readings with a valid source UNIX timestamp and RSSI are accepted. Configure Gateway timestamped publishing; its untimestamped mode is ignored. Status messages and malformed packets are ignored. Retained messages keep their source timestamps; duplicates and older messages cannot overwrite fresher readings. The sensor MAC shares names, favorites, and history with Bluetooth readings. History is collected as messages arrive, at most once per minute, without downloading older broker or tag history. This is a subscriber; configure your existing Gateway/Bridge to publish to the broker separately.
+Only RAWv2 / format 5 readings with a valid source UNIX timestamp and RSSI are accepted. Configure Gateway timestamped publishing; its untimestamped mode is ignored. Status messages and malformed packets are ignored. Retained messages keep their source timestamps; duplicates and older messages cannot overwrite fresher readings. The sensor MAC shares names, favorites, and history with Bluetooth readings. History is collected as messages arrive, at most once per minute, without downloading older broker history. Tag-memory download is a separate Bluetooth action. This is a subscriber; configure your existing Gateway/Bridge to publish to the broker separately.
 
 Linux also accepts `--mqtt-host`, `--mqtt-port`, `--mqtt-topic`, `--mqtt-username`, and `--mqtt-tls`. For CLI use, supply the session password through `RUUVILINUX_MQTT_PASSWORD`.
 
@@ -70,11 +70,21 @@ Linux also accepts `--mqtt-host`, `--mqtt-port`, `--mqtt-topic`, `--mqtt-usernam
 ruuvilinux --mqtt-host broker.example.com --mqtt-port 8883 --mqtt-tls --mqtt-topic 'ruuvi/#'
 ```
 
+## Download stored RuuviTag history (v0.3)
+
+Select a sensor and press **Download tag history**. Bring the tag into Bluetooth range, and close any other app holding a connection to it. The app temporarily connects through Nordic UART Service, reads temperature, humidity and pressure, then disconnects. Its regular Bluetooth scanning resumes afterward; MQTT subscriptions can remain active. **Cancel history download** stops the operation. The chart switches to **Last 10 days**.
+
+Standard RuuviTag firmware stores about 10 days at five-minute intervals ([official product information](https://ruuvi.com/ruuvitag/)). The request follows the [official log-read protocol](https://docs.ruuvi.com/communication/bluetooth-connection/nordic-uart-service-nus/log-read): environmental endpoint `0x3A`, current UNIX time and lower-bound time, followed by timestamped values and an explicit end marker. The computer clock anchors the tag's relative sample ages, so keep it accurate. Pressure is converted from Pa to hPa; negative temperatures are signed.
+
+History is kept for 10 days, up to 14,400 samples per tag. Live and downloaded samples in the same UNIX minute merge; existing measurements take precedence, missing fields are filled, and repeated downloads do not add another sample in the same minute. Imports preserve names, favorites, the latest live reading and last-seen time. On cancellation or failure, received samples are retained with a visible partial-result message; retrying fills what is still missing.
+
+This needs connectable firmware with logging support. Longlife firmware may not store history, and a broadcast-only tag cannot accept a connection. Connection failures explain Bluetooth power, range, firmware and other active tag connections. Ruuvi Air history and firmware changes are outside this release. History download is local to each app; the two computers do not synchronize databases with each other. MQTT alone cannot fetch a tag's onboard log.
+
 ## History and storage
 
 Data lives in `${XDG_DATA_HOME:-~/.local/share}/ruuvilinux/sensors.sqlite3`. Names, favorites, latest readings, and collected history are committed in SQLite transactions. Use `--database /path/to/sensors.sqlite3` to choose another location. Quit the app before copying / moving its database.
 
-History contains measurements observed while the app is running and awake: local receipt timestamps for Bluetooth, publisher UNIX timestamps for MQTT. Repeat measurement sequences are skipped; samples are spaced by at least one minute. Old history is pruned on incoming readings and filtered out of charts immediately. A sleeping computer or paused app cannot collect data, and this MVP does not backfill readings from tag memory. Previously saved sensors stay visible after relaunch; readings become stale after 30 seconds without an advertisement. Identity uses the RAWv2 MAC, falling back to the BlueZ device address if unavailable.
+History contains measurements observed while the app is running and awake: local receipt timestamps for Bluetooth, publisher UNIX timestamps for MQTT. Repeat measurement sequences are skipped; samples are spaced by at least one minute. History older than 10 days is pruned on incoming readings and filtered out of charts immediately. A sleeping computer or paused app cannot collect data, and tag-history download can fill past readings from compatible firmware. Previously saved sensors stay visible after relaunch; readings become stale after 30 seconds without an advertisement. Identity uses the RAWv2 MAC, falling back to the BlueZ device address if unavailable.
 
 ## Bluetooth troubleshooting
 
@@ -99,7 +109,7 @@ Real RAWv2 discovery and local history have also been verified on an Omarchy / H
 ## Protocol and library research
 
 - [Official Ruuvi RAWv2 specification](https://docs.ruuvi.com/communication/bluetooth-advertisements/data-format-5-rawv2): this small Python decoder implements the documented wire format and is tested against its published valid, minimum, maximum, and unavailable vectors. Ruuvi's Swift BTKit is used in the Mac sibling; it is not a Linux Python dependency.
-- [Official Ruuvi BTKit](https://github.com/ruuvi/BTKit) and [Bluetooth connection protocols](https://docs.ruuvi.com/communication/bluetooth-connection): reference implementations / future sensor-memory transfers. No Ruuvi library code or logos are copied here.
+- [Official Ruuvi BTKit](https://github.com/ruuvi/BTKit) and [Bluetooth connection protocols](https://docs.ruuvi.com/communication/bluetooth-connection): references for sensor-memory transfers. No Ruuvi library code or logos are copied here.
 - [Bleak scanner API](https://bleak.readthedocs.io/en/latest/api/scanner.html) / [Linux backend](https://bleak.readthedocs.io/en/latest/backends/linux.html): BlueZ D-Bus discovery, manufacturer data keyed by company ID. Bleak strips company bytes; `manufacturer_data[0x0499]` is the payload, unlike the Mac CoreBluetooth field.
 - [Omarchy](https://omarchy.org/) / [GUI manual](https://omarchy.org/manual/guis/): desktop launcher integration uses a regular freedesktop entry, with no changes to the user's desktop setup.
 - [Official Ruuvi Cloud API](https://github.com/ruuvi/ruuvi.cloudapi.yaml): cloud support is deferred; this MVP stays local.

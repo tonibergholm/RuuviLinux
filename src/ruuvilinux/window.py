@@ -11,6 +11,7 @@ from .protocol import decode_rawv2
 from .scanner import ScannerWorker
 from .mqtt_input import MQTTInput
 from .mqtt_dialog import MQTTDialog
+from .tag_logs import LogWorker
 
 
 def value(v, unit, digits=1):
@@ -24,6 +25,10 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.mqtt_client = None
         self.pending_mqtt = None
+        self.log_worker = None
+        self.pending_log = None
+        self.resume_after_log = False
+        self.log_identity = None
         self.selected = None
         self.closing = False
         self.setWindowTitle("RuuviLinux" + (" · Demo" if demo else ""))
@@ -60,12 +65,17 @@ class MainWindow(QMainWindow):
             c.addWidget(QLabel(title)); number = QLabel("—"); number.setObjectName("reading"); c.addWidget(number)
             cards.addWidget(card); self.cards[field] = number
         d.addLayout(cards)
-        chart_header = QHBoxLayout(); chart_header.addWidget(QLabel("Collected history · last 24 hours"), 1)
+        chart_header = QHBoxLayout(); chart_header.addWidget(QLabel("History"), 1)
+        self.period_picker=QComboBox();self.period_picker.addItem("Last 24 hours",86400);self.period_picker.addItem("Last 10 days",864000)
+        chart_header.addWidget(self.period_picker)
         self.metric_picker = QComboBox()
         for label, field in (("Temperature", "temperature"), ("Humidity", "humidity"), ("Pressure", "pressure")):
             self.metric_picker.addItem(label, field)
         chart_header.addWidget(self.metric_picker); d.addLayout(chart_header)
         self.chart = HistoryChart(); d.addWidget(self.chart, 1)
+        self.download_button=QPushButton("Download tag history");self.download_button.setEnabled(not demo)
+        self.download_button.clicked.connect(self.download_history);d.addWidget(self.download_button)
+        self.log_status=QLabel();self.log_status.setWordWrap(True);d.addWidget(self.log_status)
         self.history_note = QLabel(); self.history_note.setObjectName("muted"); d.addWidget(self.history_note)
         self.secondary = QLabel(); self.secondary.setWordWrap(True); d.addWidget(self.secondary)
         self.identity = QLabel(); self.identity.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse); self.identity.setObjectName("muted"); d.addWidget(self.identity)
@@ -94,6 +104,7 @@ class MainWindow(QMainWindow):
         self.name.returnPressed.connect(self.rename)
         self.favorite.clicked.connect(self.set_favorite)
         self.metric_picker.currentIndexChanged.connect(self.refresh_detail)
+        self.period_picker.currentIndexChanged.connect(self.refresh_detail)
         self.pause.clicked.connect(self.toggle_scan)
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh_detail); self.timer.start(5000)
         self.demo_timer = None
@@ -122,8 +133,47 @@ class MainWindow(QMainWindow):
         self.pause.setEnabled(True); self.pause.setText("Resume scanning")
         if self.closing:
             self.close()
+        elif self.pending_log:
+            self.begin_download()
         elif self.pending_mqtt:
             config=self.pending_mqtt; self.pending_mqtt=None; self.start_mqtt(config)
+
+    def download_history(self):
+        if self.log_worker:
+            self.log_worker.stop();self.download_button.setEnabled(False);return
+        if self.pending_log or not self.selected or self.demo:return
+        self.log_identity=self.selected;self.pending_log=self.selected
+        self.resume_after_log=bool(self.worker and self.worker.isRunning())
+        self.pause.setEnabled(False);self.mqtt_button.setEnabled(False)
+        self.download_button.setText("Cancel history download")
+        self.log_status.setText("Preparing history download…")
+        if self.resume_after_log:self.worker.stop()
+        else:self.begin_download()
+
+    def begin_download(self):
+        self.pause.setEnabled(False)
+        identity=self.pending_log;self.pending_log=None
+        self.log_worker=LogWorker(identity,self.adapter,self)
+        self.log_worker.progress.connect(self.log_status.setText)
+        self.log_worker.result.connect(self.import_history)
+        self.log_worker.finished.connect(self.log_finished)
+        self.log_worker.start()
+
+    def import_history(self,samples,error):
+        if self.closing:return
+        try:
+            added=self.store.merge_logs(self.log_identity,samples,time.time())
+            self.log_status.setText((error+" " if error else "Download complete. ")+f"Imported {added} new samples ({len(samples)} received).")
+            if samples:self.period_picker.setCurrentIndex(1)
+            self.refresh_detail()
+        except (sqlite3.Error,ValueError) as exc:self.log_status.setText(f"Could not save tag history: {exc}")
+
+    def log_finished(self):
+        self.log_worker.deleteLater();self.log_worker=None
+        self.download_button.setText("Download tag history");self.download_button.setEnabled(not self.demo)
+        self.pause.setEnabled(True);self.mqtt_button.setEnabled(True)
+        if self.closing:self.close()
+        elif self.resume_after_log:self.start_scan()
 
     def configure_mqtt(self):
         dialog=MQTTDialog(self)
@@ -216,9 +266,9 @@ class MainWindow(QMainWindow):
         self.favorite.setText("★ Favorite" if sensor["favorite"] else "☆ Favorite")
         age = max(0, int(now - sensor["last_seen"]))
         self.last_seen.setText(f"{'No recent signal' if age > 30 else 'Recent reading'} · last seen {age}s ago · {sensor['rssi']} dBm")
-        rows = self.store.history(self.selected, now)
+        rows = self.store.history(self.selected, now,self.period_picker.currentData())
         self.chart.set_data(rows, self.metric_picker.currentData())
-        self.history_note.setText(f"{len(rows)} samples · up to one per minute · collected while the app receives readings")
+        self.history_note.setText(f"{len(rows)} samples · up to one per minute · live readings and downloaded tag history")
         movement = "—" if r["movement"] is None else str(r["movement"])
         tx = "—" if r["tx_power"] is None else str(r["tx_power"])
         self.secondary.setText(f"Battery {value(r['voltage'], 'V', 3)} · movement {movement} · TX {tx} dBm\n"
@@ -260,7 +310,9 @@ class MainWindow(QMainWindow):
         self.demo_sequence += 1
 
     def closeEvent(self, event):
-        self.stop_mqtt(); self.pending_mqtt=None
+        self.stop_mqtt(); self.pending_mqtt=None;self.pending_log=None
+        if self.log_worker and self.log_worker.isRunning():
+            self.closing=True;self.timer.stop();self.log_worker.stop();event.ignore();return
         if self.worker and self.worker.isRunning():
             self.closing = True; self.timer.stop()
             self.worker.stop(); self.status.setText("Stopping Bluetooth before closing…")

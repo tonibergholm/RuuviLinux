@@ -32,7 +32,7 @@ PySide6-Essentials 6.11.2, and the machine's powered BlueZ adapter.
 
 The current desktop portal logged an app-ID registration warning; native
 Wayland rendering and BLE readings still succeeded. Portal features are not
-used by this MVP. Comparison against Ruuvi Station, sensor-memory downloads,
+used by this MVP. Comparison against Ruuvi Station, successful sensor-memory downloads,
 long unattended runs, suspend/wake, and Bluetooth power-cycle behavior were
 not tested on physical hardware. Automated tests use fake scan sessions for
 failure / shutdown paths and do not establish those additional radio behaviors.
@@ -55,3 +55,17 @@ failure / shutdown paths and do not establish those additional radio behaviors.
   converted pressure and shared the sensor identity. The test used an
   in-memory database; the normal app keeps the existing sensor database and
   resumes Bluetooth. No broker or collector service was installed.
+
+## Tag history v0.3
+
+- All 69 tests passed locally, including the real MQTT broker test. Coverage
+  includes the official request vector, negative temperature and pressure units,
+  missing values, partial/out-of-order fields, duplicate imports and persistence.
+- Fake Bluetooth sessions verify subscribe/request/end-marker/disconnect and
+  cancellation cleanup. A Qt test verifies the download action, ten-day chart
+  and preservation of the latest live reading.
+- The actual Omarchy Bluetooth adapter discovered the physical tag but its
+  connection timed out before any history was received. The same connection
+  attempt failed on macOS. Onboard historical values remain unverified on
+  physical hardware; check range, connectable logging firmware and competing
+  connections before repeating. No firmware or tag data was changed.

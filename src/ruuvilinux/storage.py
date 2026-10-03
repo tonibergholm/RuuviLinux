@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sqlite3
 from .protocol import Reading
+from .tag_logs import RETENTION, MAX_SAMPLES
 
 
 def data_path() -> Path:
@@ -47,9 +48,9 @@ class Store:
                     (reading.sequence is None or reading.sequence != previous["sequence"])):
                 self.db.execute("""INSERT INTO readings(sensor_id,time,sequence,temperature,humidity,pressure)
                     VALUES(?,?,?,?,?,?)""", (identity, now, reading.sequence, reading.temperature, reading.humidity, reading.pressure))
-            self.db.execute("DELETE FROM readings WHERE time < ?", (now - 86400,))
+            self.db.execute("DELETE FROM readings WHERE time < ?", (now - RETENTION,))
             self.db.execute("""DELETE FROM readings WHERE sensor_id=? AND id NOT IN
-                (SELECT id FROM readings WHERE sensor_id=? ORDER BY time DESC,id DESC LIMIT 1440)""", (identity, identity))
+                (SELECT id FROM readings WHERE sensor_id=? ORDER BY time DESC,id DESC LIMIT 14400)""", (identity, identity))
         return identity
 
     def sensors(self, favorites_only: bool = False) -> list[dict]:
@@ -71,9 +72,29 @@ class Store:
         with self.db:
             self.db.execute("UPDATE sensors SET favorite=? WHERE id=?", (int(enabled), identity))
 
-    def history(self, identity: str, now: float) -> list[dict]:
+    def history(self, identity: str, now: float, seconds: float = 86400) -> list[dict]:
         return [dict(r) for r in self.db.execute(
-            "SELECT * FROM readings WHERE sensor_id=? AND time>=? ORDER BY time,id", (identity, now - 86400))]
+            "SELECT * FROM readings WHERE sensor_id=? AND time>? ORDER BY time,id", (identity, now - seconds))]
+
+    def merge_logs(self, identity, samples, now):
+        if self.sensor(identity) is None: raise ValueError("Select a discovered sensor first.")
+        rows={int(r["time"]//60):dict(r) for r in self.db.execute("SELECT * FROM readings WHERE sensor_id=?",(identity,))}
+        added=0
+        with self.db:
+            for sample in samples:
+                if not now-RETENTION < sample.time <= now: continue
+                key=sample.time//60; previous=rows.get(key)
+                if previous:
+                    values=[previous[f] if previous[f] is not None else getattr(sample,f) for f in ("temperature","humidity","pressure")]
+                    self.db.execute("UPDATE readings SET temperature=?,humidity=?,pressure=? WHERE id=?",(*values,previous["id"]))
+                    previous.update(zip(("temperature","humidity","pressure"),values))
+                else:
+                    cursor=self.db.execute("INSERT INTO readings(sensor_id,time,temperature,humidity,pressure) VALUES(?,?,?,?,?)",
+                        (identity,sample.time,sample.temperature,sample.humidity,sample.pressure))
+                    rows[key]={"id":cursor.lastrowid,"temperature":sample.temperature,"humidity":sample.humidity,"pressure":sample.pressure};added+=1
+            self.db.execute("DELETE FROM readings WHERE sensor_id=? AND time<=?",(identity,now-RETENTION))
+            self.db.execute("DELETE FROM readings WHERE sensor_id=? AND id NOT IN (SELECT id FROM readings WHERE sensor_id=? ORDER BY time DESC,id DESC LIMIT 14400)",(identity,identity))
+        return added
 
     def close(self):
         self.db.close()
