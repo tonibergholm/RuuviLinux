@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ruuvilinux"
-version = "0.3.0"
+version = "0.4.0"
 description = "Native desktop RuuviTag viewer for Omarchy and Linux"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,7 @@ dev = ["pytest>=8,<10", "build>=1,<2"]
 
 [project.scripts]
 ruuvilinux = "ruuvilinux.app:main"
+ruuvilinux-collector = "ruuvilinux.collector:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -11,8 +11,7 @@ from .protocol import decode_advertisement
 SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e'
 RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
 TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'
-RETENTION = 10 * 86400
-MAX_SAMPLES = 14400
+from .history_limits import RETENTION, MAX_SAMPLES
 
 @dataclass(frozen=True)
 class LogSample:

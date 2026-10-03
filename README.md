@@ -16,7 +16,7 @@ An independent, open-source **native Qt desktop app** for RuuviTags on Omarchy /
 - Native desktop launcher for Omarchy's **Super + Space** menu.
 - Demo mode with generated data; demo never accesses your sensor database or Bluetooth.
 
-Supports **RuuviTag RAWv2 / format 5** only in v0.3. Ruuvi Air, legacy formats, cloud sync, alerts, firmware updates are outside this release.
+Supports **RuuviTag RAWv2 / format 5** only in v0.4. Ruuvi Air, legacy formats, cloud sync, alerts, firmware updates are outside this release.
 
 ## Install on Omarchy / Arch
 
@@ -34,7 +34,7 @@ cd RuuviLinux
 
 Open **RuuviLinux** from Super + Space, or run `~/.local/bin/ruuvilinux`. Bring a RAWv2 RuuviTag nearby; it appears automatically. Edit a name and press Enter or Save name; use Favorite to save it in the favorite list.
 
-The installer creates an isolated Python environment under `${XDG_DATA_HOME:-~/.local/share}/ruuvilinux/venv`, a launcher under `~/.local/bin`, a desktop entry, and an icon. It does not change Hyprland configuration, enable background services for the app, or run Bluetooth scanning as root. Re-run the installer after pulling updates.
+The installer creates an isolated Python environment under `${XDG_DATA_HOME:-~/.local/share}/ruuvilinux/venv`, a launcher under `~/.local/bin`, a desktop entry, an icon, and a user service for headless collection. When a user service manager is available, it enables and starts that collector. It does not change Hyprland configuration or run Bluetooth scanning as root. Re-run the installer after pulling updates.
 
 If the Wayland Qt plugin cannot load, check missing shared-library messages; install the matching desktop runtime dependencies. `QT_QPA_PLATFORM=xcb ~/.local/bin/ruuvilinux` is a fallback when XWayland is available (Arch may also need `libxcb`, `xcb-util-cursor`, and `libxkbcommon-x11`). Prefer the default native Wayland backend on Hyprland.
 
@@ -80,11 +80,35 @@ History is kept for 10 days, up to 14,400 samples per tag. Live and downloaded s
 
 This needs connectable firmware with logging support. Longlife firmware may not store history, and a broadcast-only tag cannot accept a connection. Connection failures explain Bluetooth power, range, firmware and other active tag connections. Ruuvi Air history and firmware changes are outside this release. History download is local to each app; the two computers do not synchronize databases with each other. MQTT alone cannot fetch a tag's onboard log.
 
+## Omarchy menu-bar plugin (v0.4)
+
+[RuuviTags for the Omarchy bar](https://github.com/tonibergholm/RuuviOmarchy) shows a favorite reading and a dropdown with all tags, units, battery and freshness. Install this app first, then run:
+
+```sh
+omarchy plugin add https://github.com/tonibergholm/RuuviOmarchy.git --enable
+```
+
+The installer enables a separate **ruuvilinux-collector.service** user daemon. It collects BLE readings and writes history even when the desktop app is closed. The plugin reads that same database without writing to it. The GUI uses the daemon when available, and a local single-instance guard reopens its existing window. It pauses the daemon briefly for tag-history downloads and resumes afterward; a six-minute pause lease also recovers if the GUI crashes. Demo and smoke-test runs remain isolated. With no daemon running, the app can still scan on its own.
+
+Manage the service with:
+
+```sh
+systemctl --user status ruuvilinux-collector.service
+systemctl --user stop ruuvilinux-collector.service
+systemctl --user disable --now ruuvilinux-collector.service
+systemctl --user enable --now ruuvilinux-collector.service
+journalctl --user -u ruuvilinux-collector.service
+```
+
+The collector uses asyncio/Bleak/Paho and SQLite; it imports no Qt or window code. It retries unavailable Bluetooth, reopens discovery periodically to recover adapter power cycles, and systemd restarts it after an unexpected exit. One collector owns each database. Its local control socket is user-only (0600), accepts bounded JSON and never returns broker passwords. Installation starts the daemon at login; sleep or logout can stop collection. It does not enable system-wide startup or user lingering.
+
+MQTT settings changed in the GUI apply to the daemon and continue collecting after the window closes. Settings and passwords remain in the daemon's memory for that session; restarting it defaults to Bluetooth. For unattended MQTT, create a user-service override with `systemctl --user edit ruuvilinux-collector.service`, clear `ExecStart=`, and set it to the installed `ruuvilinux-collector --mqtt-host HOST --mqtt-topic 'ruuvi/#'` with optional port, username and TLS flags. Supply `RUUVILINUX_MQTT_PASSWORD` through a private `EnvironmentFile` rather than a command-line argument. A custom database needs matching `--database /path/to/sensors.sqlite3` on the service, desktop app and plugin.
+
 ## History and storage
 
 Data lives in `${XDG_DATA_HOME:-~/.local/share}/ruuvilinux/sensors.sqlite3`. Names, favorites, latest readings, and collected history are committed in SQLite transactions. Use `--database /path/to/sensors.sqlite3` to choose another location. Quit the app before copying / moving its database.
 
-History contains measurements observed while the app is running and awake: local receipt timestamps for Bluetooth, publisher UNIX timestamps for MQTT. Repeat measurement sequences are skipped; samples are spaced by at least one minute. History older than 10 days is pruned on incoming readings and filtered out of charts immediately. A sleeping computer or paused app cannot collect data, and tag-history download can fill past readings from compatible firmware. Previously saved sensors stay visible after relaunch; readings become stale after 30 seconds without an advertisement. Identity uses the RAWv2 MAC, falling back to the BlueZ device address if unavailable.
+History contains measurements observed while the collector (or standalone app) is running and the machine is awake: local receipt timestamps for Bluetooth, publisher UNIX timestamps for MQTT. Repeat measurement sequences are skipped; samples are spaced by at least one minute. History older than 10 days is pruned on incoming readings and filtered out of charts immediately. A sleeping computer or paused app cannot collect data, and tag-history download can fill past readings from compatible firmware. Previously saved sensors stay visible after relaunch; readings become stale after 30 seconds without an advertisement. Identity uses the RAWv2 MAC, falling back to the BlueZ device address if unavailable.
 
 ## Bluetooth troubleshooting
 

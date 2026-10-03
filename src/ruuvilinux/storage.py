@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import sqlite3
 from .protocol import Reading
-from .tag_logs import RETENTION, MAX_SAMPLES
+from .history_limits import RETENTION, MAX_SAMPLES
 
 
 def data_path() -> Path:
@@ -15,6 +15,7 @@ def data_path() -> Path:
 class Store:
     def __init__(self, path: Path | str | None = None):
         path = path if path is not None else data_path()
+        self.path = path
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(path))

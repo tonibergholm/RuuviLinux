@@ -19,6 +19,15 @@ uv pip install --python "$VENV/bin/python" --upgrade "$ROOT"
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$VENV/bin/ruuvilinux" "$HOME/.local/bin/ruuvilinux"
 "$VENV/bin/python" "$ROOT/scripts/install-desktop.py" "$VENV/bin/ruuvilinux" "$ROOT/packaging/org.ruuvilinux.app.svg"
+"$VENV/bin/python" "$ROOT/scripts/install-service.py" "$VENV/bin/ruuvilinux-collector"
+if command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then
+    systemctl --user daemon-reload
+    systemctl --user enable ruuvilinux-collector.service
+    systemctl --user restart ruuvilinux-collector.service
+    echo "Background collection enabled. Closing the desktop app keeps collecting."
+else
+    echo "User service installed. Start it in your desktop session: systemctl --user enable --now ruuvilinux-collector.service"
+fi
 if command -v update-desktop-database >/dev/null; then
     update-desktop-database "$DATA_DIR/applications"
 fi

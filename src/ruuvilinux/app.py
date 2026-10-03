@@ -5,7 +5,8 @@ from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 from . import __version__
-from .storage import Store
+from .storage import Store, data_path
+from .instance import InstanceGuard
 from .window import MainWindow
 from .mqtt_input import MQTTSettings
 
@@ -37,6 +38,14 @@ def main(argv=None):
     app.setApplicationName("RuuviLinux")
     app.setDesktopFileName("org.ruuvilinux.app")
     app.setOrganizationName("RuuviLinux")
+    guard = None
+    if not (args.demo or args.smoke_test):
+        try:
+            guard = InstanceGuard(args.database or data_path(), app)
+            if not guard.claim(): return 0
+        except RuntimeError as error:
+            print(str(error), file=sys.stderr)
+            return 1
     try:
         # Demo never reads or writes the real sensor database.
         store = Store(":memory:" if args.demo or args.smoke_test else args.database)
@@ -45,6 +54,14 @@ def main(argv=None):
         return 1
     window = MainWindow(store, demo=args.demo or args.smoke_test, adapter=args.adapter,start_scanning=config is None)
     window.show()
+    if guard:
+        def activate():
+            app.setQuitOnLastWindowClosed(True)
+            if window.isMinimized(): window.showNormal()
+            else: window.show()
+            window.raise_(); window.activateWindow()
+        guard.activated.connect(activate)
+        app.aboutToQuit.connect(guard.close)
     if config: QTimer.singleShot(0,lambda:window.use_mqtt(config))
     def capture():
         if args.screenshot:

@@ -1,7 +1,7 @@
 import math
 import sqlite3
 import time
-from dataclasses import replace
+from dataclasses import replace, asdict
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QListWidget, QListWidgetItem, QPushButton, QLineEdit, QCheckBox,
@@ -12,6 +12,7 @@ from .scanner import ScannerWorker
 from .mqtt_input import MQTTInput
 from .mqtt_dialog import MQTTDialog
 from .tag_logs import LogWorker
+from .collector_client import request as collector_request
 
 
 def value(v, unit, digits=1):
@@ -29,6 +30,9 @@ class MainWindow(QMainWindow):
         self.pending_log = None
         self.resume_after_log = False
         self.log_identity = None
+        self.collector_active = False
+        self.collector_state = None
+        self.resume_daemon_after_log = False
         self.selected = None
         self.closing = False
         self.setWindowTitle("RuuviLinux" + (" · Demo" if demo else ""))
@@ -107,6 +111,7 @@ class MainWindow(QMainWindow):
         self.period_picker.currentIndexChanged.connect(self.refresh_detail)
         self.pause.clicked.connect(self.toggle_scan)
         self.timer = QTimer(self); self.timer.timeout.connect(self.refresh_detail); self.timer.start(5000)
+        self.timer.timeout.connect(self.poll_collector)
         self.demo_timer = None
         if demo:
             self.seed_demo()
@@ -118,6 +123,11 @@ class MainWindow(QMainWindow):
     def start_scan(self):
         if self.closing or (self.worker and self.worker.isRunning()):
             return
+        if not self.demo and str(self.store.path) != ":memory:":
+            try:
+                self.collector_state = collector_request(self.store.path)
+                self.collector_active = True; self.poll_collector(); return
+            except (OSError,ValueError): pass
         self.empty_title.setText("Bring a RuuviTag nearby")
         self.status.setText("Starting Bluetooth…")
         self.pause.setText("Pause scanning"); self.pause.setEnabled(True)
@@ -126,6 +136,25 @@ class MainWindow(QMainWindow):
         self.worker.status_changed.connect(self.status.setText)
         self.worker.finished.connect(self.scan_finished)
         self.worker.start()
+
+    def poll_collector(self):
+        if not self.collector_active or self.closing: return
+        try:
+            self.collector_state = collector_request(self.store.path)
+            self.status.setText(self.collector_state["status"])
+            busy = bool(self.log_worker or self.pending_log)
+            self.pause.setEnabled(not busy)
+            self.pause.setText("Use Bluetooth" if self.collector_state["source"] == "mqtt" else
+                               ("Resume collector" if self.collector_state["paused"] else "Pause collector"))
+            sensors = self.store.sensors(self.only_favorites.isChecked())
+            ids = [self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())]
+            if ids != [s["id"] for s in sensors]: self.refresh_list()
+            else:
+                for i,s in enumerate(sensors): self.list.item(i).setText(("★ " if s["favorite"] else "")+s["name"])
+            self.refresh_detail()
+        except (OSError,ValueError,sqlite3.Error):
+            self.status.setText("Background collector is offline. Start ruuvilinux-collector.service to resume.")
+            self.pause.setEnabled(False)
 
     def scan_finished(self):
         if self.worker:
@@ -147,6 +176,17 @@ class MainWindow(QMainWindow):
         self.pause.setEnabled(False);self.mqtt_button.setEnabled(False)
         self.download_button.setText("Cancel history download")
         self.log_status.setText("Preparing history download…")
+        if self.collector_active:
+            try:
+                state=collector_request(self.store.path)
+                self.resume_daemon_after_log=state["source"]=="bluetooth" and not state["paused"]
+                if self.resume_daemon_after_log:
+                    collector_request(self.store.path,"pause",timeout=8,leaseSeconds=360)
+            except (OSError,ValueError):
+                self.pending_log=None;self.resume_daemon_after_log=False
+                self.download_button.setText("Download tag history")
+                self.log_status.setText("Could not pause the collector. Check its service and retry.")
+                self.mqtt_button.setEnabled(True);self.poll_collector();return
         if self.resume_after_log:self.worker.stop()
         else:self.begin_download()
 
@@ -172,6 +212,10 @@ class MainWindow(QMainWindow):
         self.log_worker.deleteLater();self.log_worker=None
         self.download_button.setText("Download tag history");self.download_button.setEnabled(not self.demo)
         self.pause.setEnabled(True);self.mqtt_button.setEnabled(True)
+        if self.resume_daemon_after_log:
+            self.resume_daemon_after_log=False
+            try: collector_request(self.store.path,"resume",timeout=8)
+            except (OSError,ValueError): self.status.setText("Collector will resume when the history pause lease expires.")
         if self.closing:self.close()
         elif self.resume_after_log:self.start_scan()
 
@@ -180,6 +224,10 @@ class MainWindow(QMainWindow):
         result=dialog.exec()
         if result==1: self.use_mqtt(dialog.settings())
         elif result==2:
+            if self.collector_active:
+                try: collector_request(self.store.path,"bluetooth",timeout=8);self.poll_collector()
+                except (OSError,ValueError) as error:self.status.setText(f"Could not switch collector: {error}")
+                return
             self.stop_mqtt(); self.pending_mqtt=None
             if not self.worker: self.start_scan()
 
@@ -190,6 +238,15 @@ class MainWindow(QMainWindow):
             self.mqtt_client.stop(); self.mqtt_client.deleteLater(); self.mqtt_client=None
 
     def use_mqtt(self,config):
+        if not self.collector_active and not self.demo and str(self.store.path) != ":memory:":
+            try:
+                self.collector_state=collector_request(self.store.path);self.collector_active=True
+            except (OSError,ValueError): pass
+        if self.collector_active:
+            try:
+                collector_request(self.store.path,"mqtt",timeout=8,settings=asdict(config));self.poll_collector()
+            except (OSError,ValueError) as error:self.status.setText(f"Could not configure collector: {error}")
+            return
         self.stop_mqtt()
         if self.worker and self.worker.isRunning():
             self.pending_mqtt=config; self.worker.stop(); self.pause.setEnabled(False)
@@ -205,6 +262,13 @@ class MainWindow(QMainWindow):
         except Exception as error: self.status.setText("Could not start MQTT: "+str(error))
 
     def toggle_scan(self):
+        if self.collector_active:
+            try:
+                state=collector_request(self.store.path)
+                command="bluetooth" if state["source"]=="mqtt" else ("resume" if state["paused"] else "pause")
+                collector_request(self.store.path,command,timeout=8);self.poll_collector()
+            except (OSError,ValueError) as error:self.status.setText(f"Could not control collector: {error}")
+            return
         if self.mqtt_client:
             self.stop_mqtt(); self.status.setText("MQTT disconnected"); self.pause.setText("Resume Bluetooth")
             return
