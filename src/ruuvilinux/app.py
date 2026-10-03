@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 from PySide6.QtCore import QTimer
@@ -6,6 +7,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from . import __version__
 from .storage import Store
 from .window import MainWindow
+from .mqtt_input import MQTTSettings
 
 
 def main(argv=None):
@@ -16,7 +18,19 @@ def main(argv=None):
     parser.add_argument("--database", type=Path, help="Override the SQLite database location")
     parser.add_argument("--smoke-test", action="store_true", help="Render demo UI and exit without Bluetooth")
     parser.add_argument("--screenshot", type=Path, help="Save a demo screenshot (requires --demo or --smoke-test)")
+    parser.add_argument("--mqtt-host",help="Use MQTT instead of Bluetooth")
+    parser.add_argument("--mqtt-port",type=int,default=1883)
+    parser.add_argument("--mqtt-topic",default="ruuvi/#")
+    parser.add_argument("--mqtt-username",default="")
+    parser.add_argument("--mqtt-tls",action="store_true")
     args = parser.parse_args(argv)
+    config=None
+    if args.mqtt_host:
+        if args.demo or args.smoke_test: parser.error("Demo mode does not connect to MQTT.")
+        config=MQTTSettings(args.mqtt_host,args.mqtt_port,args.mqtt_topic,args.mqtt_username,
+                            os.environ.get("RUUVILINUX_MQTT_PASSWORD",""),args.mqtt_tls)
+        try: config.validate()
+        except ValueError as error: parser.error(str(error))
     if args.screenshot and not (args.demo or args.smoke_test):
         parser.error("--screenshot requires --demo or --smoke-test")
     app = QApplication([sys.argv[0]])
@@ -29,8 +43,9 @@ def main(argv=None):
     except Exception as error:
         QMessageBox.critical(None, "Could not open sensor database", str(error))
         return 1
-    window = MainWindow(store, demo=args.demo or args.smoke_test, adapter=args.adapter)
+    window = MainWindow(store, demo=args.demo or args.smoke_test, adapter=args.adapter,start_scanning=config is None)
     window.show()
+    if config: QTimer.singleShot(0,lambda:window.use_mqtt(config))
     def capture():
         if args.screenshot:
             args.screenshot.parent.mkdir(parents=True, exist_ok=True)

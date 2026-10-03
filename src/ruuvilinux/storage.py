@@ -33,6 +33,9 @@ class Store:
 
     def receive(self, address: str, reading: Reading, rssi: int, now: float) -> str:
         identity = reading.mac or address.upper()
+        existing=self.db.execute("SELECT last_seen FROM sensors WHERE id=?",(identity,)).fetchone()
+        if existing and now<=existing["last_seen"]:
+            return identity  # stale / repeated retained messages never refresh freshness
         with self.db:
             self.db.execute("""INSERT INTO sensors(id,name,last_seen,rssi,latest)
                 VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET

@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
 from .chart import HistoryChart
 from .protocol import decode_rawv2
 from .scanner import ScannerWorker
+from .mqtt_input import MQTTInput
+from .mqtt_dialog import MQTTDialog
 
 
 def value(v, unit, digits=1):
@@ -20,6 +22,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.store, self.demo, self.adapter = store, demo, adapter
         self.worker = None
+        self.mqtt_client = None
+        self.pending_mqtt = None
         self.selected = None
         self.closing = False
         self.setWindowTitle("RuuviLinux" + (" · Demo" if demo else ""))
@@ -38,7 +42,7 @@ class MainWindow(QMainWindow):
         split.addWidget(sidebar)
         self.pages = QStackedWidget(); split.addWidget(self.pages)
         empty = QWidget(); layout = QVBoxLayout(empty); layout.addStretch()
-        label = QLabel("Bring a RuuviTag nearby"); label.setObjectName("title"); label.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(label)
+        label = QLabel("Bring a RuuviTag nearby"); self.empty_title=label; label.setObjectName("title"); label.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(label)
         label = QLabel("Read temperature, humidity, and pressure over Bluetooth.\nNo pairing, Gateway, or account needed.\n\nSupports RuuviTag RAWv2 (format 5).")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(label); layout.addStretch()
         self.pages.addWidget(empty)
@@ -71,6 +75,8 @@ class MainWindow(QMainWindow):
         self.status = QLabel("Demo data · Bluetooth is disabled" if demo else "Starting Bluetooth…")
         self.status.setWordWrap(True); footer.addWidget(self.status, 1)
         self.pause = QPushButton("Pause scanning"); self.pause.setEnabled(not demo); footer.addWidget(self.pause)
+        self.mqtt_button=QPushButton("MQTT settings…"); self.mqtt_button.setEnabled(not demo)
+        self.mqtt_button.clicked.connect(self.configure_mqtt); footer.addWidget(self.mqtt_button)
         outer.addLayout(footer)
         self.setStyleSheet("""
             QLabel#title { font-size: 24px; font-weight: 600; }
@@ -101,6 +107,7 @@ class MainWindow(QMainWindow):
     def start_scan(self):
         if self.closing or (self.worker and self.worker.isRunning()):
             return
+        self.empty_title.setText("Bring a RuuviTag nearby")
         self.status.setText("Starting Bluetooth…")
         self.pause.setText("Pause scanning"); self.pause.setEnabled(True)
         self.worker = ScannerWorker(adapter=self.adapter, parent=self)
@@ -115,13 +122,47 @@ class MainWindow(QMainWindow):
         self.pause.setEnabled(True); self.pause.setText("Resume scanning")
         if self.closing:
             self.close()
+        elif self.pending_mqtt:
+            config=self.pending_mqtt; self.pending_mqtt=None; self.start_mqtt(config)
+
+    def configure_mqtt(self):
+        dialog=MQTTDialog(self)
+        result=dialog.exec()
+        if result==1: self.use_mqtt(dialog.settings())
+        elif result==2:
+            self.stop_mqtt(); self.pending_mqtt=None
+            if not self.worker: self.start_scan()
+
+    def stop_mqtt(self):
+        if self.mqtt_client:
+            self.mqtt_client.reading_received.disconnect(self.receive)
+            self.mqtt_client.status_changed.disconnect(self.status.setText)
+            self.mqtt_client.stop(); self.mqtt_client.deleteLater(); self.mqtt_client=None
+
+    def use_mqtt(self,config):
+        self.stop_mqtt()
+        if self.worker and self.worker.isRunning():
+            self.pending_mqtt=config; self.worker.stop(); self.pause.setEnabled(False)
+        else: self.start_mqtt(config)
+
+    def start_mqtt(self,config):
+        try:
+            self.empty_title.setText("Waiting for MQTT readings")
+            self.mqtt_client=MQTTInput(config,self)
+            self.mqtt_client.reading_received.connect(self.receive)
+            self.mqtt_client.status_changed.connect(self.status.setText)
+            self.mqtt_client.start(); self.pause.setText("Disconnect MQTT"); self.pause.setEnabled(True)
+        except Exception as error: self.status.setText("Could not start MQTT: "+str(error))
 
     def toggle_scan(self):
+        if self.mqtt_client:
+            self.stop_mqtt(); self.status.setText("MQTT disconnected"); self.pause.setText("Resume Bluetooth")
+            return
         if self.worker and self.worker.isRunning():
             self.worker.stop(); self.status.setText("Stopping scan…")
             self.pause.setEnabled(False)
             # The finish signal will re-enable controls; BLE stop is asynchronous.
-            self.worker.finished.connect(lambda: self.status.setText("Scanning paused"))
+            self.worker.finished.connect(lambda: self.status.setText("Scanning paused") if self.mqtt_client is None and not self.closing else None)
         else:
             self.start_scan()
 
@@ -174,10 +215,10 @@ class MainWindow(QMainWindow):
         self.favorite.setChecked(bool(sensor["favorite"]))
         self.favorite.setText("★ Favorite" if sensor["favorite"] else "☆ Favorite")
         age = max(0, int(now - sensor["last_seen"]))
-        self.last_seen.setText(f"{'No recent signal' if age > 30 else 'Nearby'} · last seen {age}s ago · {sensor['rssi']} dBm")
+        self.last_seen.setText(f"{'No recent signal' if age > 30 else 'Recent reading'} · last seen {age}s ago · {sensor['rssi']} dBm")
         rows = self.store.history(self.selected, now)
         self.chart.set_data(rows, self.metric_picker.currentData())
-        self.history_note.setText(f"{len(rows)} samples · up to one per minute · collected while awake and scanning")
+        self.history_note.setText(f"{len(rows)} samples · up to one per minute · collected while the app receives readings")
         movement = "—" if r["movement"] is None else str(r["movement"])
         tx = "—" if r["tx_power"] is None else str(r["tx_power"])
         self.secondary.setText(f"Battery {value(r['voltage'], 'V', 3)} · movement {movement} · TX {tx} dBm\n"
@@ -219,6 +260,7 @@ class MainWindow(QMainWindow):
         self.demo_sequence += 1
 
     def closeEvent(self, event):
+        self.stop_mqtt(); self.pending_mqtt=None
         if self.worker and self.worker.isRunning():
             self.closing = True; self.timer.stop()
             self.worker.stop(); self.status.setText("Stopping Bluetooth before closing…")

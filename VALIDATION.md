@@ -36,3 +36,14 @@ used by this MVP. Comparison against Ruuvi Station, sensor-memory downloads,
 long unattended runs, suspend/wake, and Bluetooth power-cycle behavior were
 not tested on physical hardware. Automated tests use fake scan sessions for
 failure / shutdown paths and do not establish those additional radio behaviors.
+
+## MQTT v0.2
+
+- Local development: 62 tests passed including a real loopback broker and Qt
+  window ingestion. Gateway raw and RuuviBridge decoded messages resolve to
+  one sensor; source timestamps, retained-message age, duplicate/out-of-order
+  protection, pressure conversion, credentials/TLS configuration, and broker
+  subscription rejection are covered.
+- Credentials/TLS setup is unit tested; a production authenticated/TLS broker
+  was not used. Passwords are session-only.
+- CI now includes a Mosquitto broker integration test.

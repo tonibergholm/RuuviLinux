@@ -16,7 +16,7 @@ An independent, open-source **native Qt desktop app** for RuuviTags on Omarchy /
 - Native desktop launcher for Omarchy's **Super + Space** menu.
 - Demo mode with generated data; demo never accesses your sensor database or Bluetooth.
 
-Supports **RuuviTag RAWv2 / format 5** only in v0.1. Ruuvi Air, legacy formats, cloud sync, alerts, sensor-memory downloads, and firmware updates are outside this release.
+Supports **RuuviTag RAWv2 / format 5** only in v0.2. Ruuvi Air, legacy formats, cloud sync, alerts, sensor-memory downloads, and firmware updates are outside this release.
 
 ## Install on Omarchy / Arch
 
@@ -50,11 +50,31 @@ uv pip install --python .venv/bin/python -e '.[dev]'
 
 `--adapter` selects a Linux adapter if multiple are installed. This project targets Linux; demo / test mode can also run on macOS for development. Use RuuviMac for supported macOS BLE operation.
 
+## MQTT input (v0.2)
+
+Open **MQTT settings** to enter your broker hostname, port, topic filter, optional username/password, and TLS setting. Connect MQTT switches from Bluetooth to the broker; **Use Bluetooth** switches back. MQTT reconnects automatically during the session. The app starts with Bluetooth on the next launch. Non-secret connection settings are saved; the password remains in memory for this session only.
+
+Use port 1883 for plain MQTT or your broker's TLS port (commonly 8883), and enable TLS for the latter. TLS verifies the broker certificate using system trust; self-signed certificates need to be trusted by the operating system. Enter a hostname rather than a URL. The default topic filter is `ruuvi/#`; change it to match your publisher, for example `ruuvibridge/#`.
+
+Supported input is MQTT 3.1.1 JSON from:
+
+- [Ruuvi Gateway](https://docs.ruuvi.com/ruuvi-gateway-firmware/data-formats/mqtt-time-stamped-data-from-bluetooth-sensors): `data` advertisement hex, `ts` UNIX seconds, and `rssi`; `gwts` is a fallback timestamp.
+- [ruuvi-go-gateway](https://github.com/Scrin/ruuvi-go-gateway): the same raw Gateway fields.
+- [RuuviBridge](https://github.com/Scrin/RuuviBridge): `data_format: 5`, `mac`, `timestamp` UNIX seconds, `rssi`, and decoded sensor fields. Bridge pressure in Pa is converted to hPa; voltage remains V and acceleration remains g.
+
+Only RAWv2 / format 5 readings with a valid source UNIX timestamp and RSSI are accepted. Configure Gateway timestamped publishing; its untimestamped mode is ignored. Status messages and malformed packets are ignored. Retained messages keep their source timestamps; duplicates and older messages cannot overwrite fresher readings. The sensor MAC shares names, favorites, and history with Bluetooth readings. History is collected as messages arrive, at most once per minute, without downloading older broker or tag history. This is a subscriber; configure your existing Gateway/Bridge to publish to the broker separately.
+
+Linux also accepts `--mqtt-host`, `--mqtt-port`, `--mqtt-topic`, `--mqtt-username`, and `--mqtt-tls`. For CLI use, supply the session password through `RUUVILINUX_MQTT_PASSWORD`.
+
+```sh
+ruuvilinux --mqtt-host broker.example.com --mqtt-port 8883 --mqtt-tls --mqtt-topic 'ruuvi/#'
+```
+
 ## History and storage
 
 Data lives in `${XDG_DATA_HOME:-~/.local/share}/ruuvilinux/sensors.sqlite3`. Names, favorites, latest readings, and collected history are committed in SQLite transactions. Use `--database /path/to/sensors.sqlite3` to choose another location. Quit the app before copying / moving its database.
 
-History contains local receipt timestamps and measurements observed while the app is running, awake, and scanning. Repeat measurement sequences are skipped; samples are spaced by at least one minute. Old history is pruned on incoming readings and filtered out of charts immediately. A sleeping computer or paused app cannot collect data, and this MVP does not backfill readings from tag memory. Previously saved sensors stay visible after relaunch; readings become stale after 30 seconds without an advertisement. Identity uses the RAWv2 MAC, falling back to the BlueZ device address if unavailable.
+History contains measurements observed while the app is running and awake: local receipt timestamps for Bluetooth, publisher UNIX timestamps for MQTT. Repeat measurement sequences are skipped; samples are spaced by at least one minute. Old history is pruned on incoming readings and filtered out of charts immediately. A sleeping computer or paused app cannot collect data, and this MVP does not backfill readings from tag memory. Previously saved sensors stay visible after relaunch; readings become stale after 30 seconds without an advertisement. Identity uses the RAWv2 MAC, falling back to the BlueZ device address if unavailable.
 
 ## Bluetooth troubleshooting
 
@@ -72,7 +92,7 @@ QT_QPA_PLATFORM=offscreen .venv/bin/ruuvilinux --smoke-test --screenshot /tmp/ru
 .venv/bin/python -m build
 ```
 
-Tests cover official protocol vectors and unavailable values, every truncated payload length, wrong manufacturers / unsupported formats, history deduplication / retention, name and favorite persistence, XDG paths, failed scanner startup / shutdown, advertisement dispatch, and GUI interactions. GitHub Actions runs these checks on Ubuntu Linux.
+Tests cover official protocol vectors and unavailable values, every truncated payload length, wrong manufacturers / unsupported formats, history deduplication / retention, name and favorite persistence, XDG paths, failed scanner startup / shutdown, advertisement dispatch, and GUI interactions. MQTT tests cover raw/Bridge messages, timestamps, authentication/TLS setup and subscription rejection. Set `RUUVILINUX_MQTT_TEST_PORT=18884` with a local broker on 127.0.0.1 to include real broker/GUI ingestion; otherwise that test is skipped. GitHub Actions includes this broker test on Ubuntu Linux.
 
 Real RAWv2 discovery and local history have also been verified on an Omarchy / Hyprland machine. See `VALIDATION.md` for exact coverage and remaining checks. Hardware smoke test on Omarchy: discover a real RAWv2 tag, compare readings with Ruuvi Station, rename/favorite, wait for minute samples, relaunch, pause/resume, move out of range, turn Bluetooth off/on, and close while scanning.
 
@@ -86,4 +106,4 @@ Real RAWv2 discovery and local history have also been verified on an Omarchy / H
 
 ## Licensing
 
-Project code is MIT (`LICENSE`). The original SVG application icon is included under the same license. Bleak is MIT. PySide6 / Qt remain under their own [Qt for Python licensing terms](https://doc.qt.io/qtforpython-6/licenses.html), including LGPLv3 / GPLv3 / commercial options; installing this source app does not relicense them. This app uses QtCore, QtGui, and QtWidgets via PySide6-Essentials and does not use Qt Charts. If redistributing bundled runtime libraries, preserve notices and meet applicable license obligations. Ruuvi and Omarchy trademarks belong to their owners. This project is independent and is not an official Ruuvi or Omarchy product.
+Project code is MIT (`LICENSE`). The original SVG application icon is included under the same license. Bleak is MIT. Eclipse Paho MQTT is dual licensed EPL-2.0 / EDL-1.0 and remains under its upstream terms. PySide6 / Qt remain under their own [Qt for Python licensing terms](https://doc.qt.io/qtforpython-6/licenses.html), including LGPLv3 / GPLv3 / commercial options; installing this source app does not relicense them. This app uses QtCore, QtGui, and QtWidgets via PySide6-Essentials and does not use Qt Charts. If redistributing bundled runtime libraries, preserve notices and meet applicable license obligations. Ruuvi and Omarchy trademarks belong to their owners. This project is independent and is not an official Ruuvi or Omarchy product.
