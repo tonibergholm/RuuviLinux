@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ruuvilinux"
+version = "0.1.0"
+description = "Native desktop RuuviTag viewer for Omarchy and Linux"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "RuuviLinux contributors"}]
+dependencies = ["bleak>=1.0,<4", "PySide6-Essentials>=6.7,<7"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "build>=1,<2"]
+
+[project.scripts]
+ruuvilinux = "ruuvilinux.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

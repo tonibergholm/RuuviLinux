@@ -1,0 +1,232 @@
+import math
+import sqlite3
+import time
+from dataclasses import replace
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+    QLabel, QListWidget, QListWidgetItem, QPushButton, QLineEdit, QCheckBox,
+    QComboBox, QFrame, QSplitter, QMessageBox, QStackedWidget)
+from .chart import HistoryChart
+from .protocol import decode_rawv2
+from .scanner import ScannerWorker
+
+
+def value(v, unit, digits=1):
+    return "—" if v is None else f"{v:.{digits}f} {unit}"
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, store, demo=False, adapter=None, start_scanning=True):
+        super().__init__()
+        self.store, self.demo, self.adapter = store, demo, adapter
+        self.worker = None
+        self.selected = None
+        self.closing = False
+        self.setWindowTitle("RuuviLinux" + (" · Demo" if demo else ""))
+        self.resize(1060, 720)
+        self.setMinimumSize(820, 580)
+        shell = QWidget(); self.setCentralWidget(shell)
+        outer = QVBoxLayout(shell); outer.setContentsMargins(16, 16, 16, 12)
+        split = QSplitter(); outer.addWidget(split, 1)
+        sidebar = QWidget(); side = QVBoxLayout(sidebar)
+        title = QLabel("RuuviLinux"); title.setObjectName("title"); side.addWidget(title)
+        caption = QLabel("Your nearby environment"); caption.setObjectName("muted"); side.addWidget(caption)
+        self.only_favorites = QCheckBox("Favorites only")
+        side.addWidget(self.only_favorites)
+        self.list = QListWidget(); side.addWidget(self.list)
+        self.list.setAccessibleName("Ruuvi sensors")
+        split.addWidget(sidebar)
+        self.pages = QStackedWidget(); split.addWidget(self.pages)
+        empty = QWidget(); layout = QVBoxLayout(empty); layout.addStretch()
+        label = QLabel("Bring a RuuviTag nearby"); label.setObjectName("title"); label.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(label)
+        label = QLabel("Read temperature, humidity, and pressure over Bluetooth.\nNo pairing, Gateway, or account needed.\n\nSupports RuuviTag RAWv2 (format 5).")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter); layout.addWidget(label); layout.addStretch()
+        self.pages.addWidget(empty)
+        details = QWidget(); d = QVBoxLayout(details); d.setContentsMargins(22, 8, 8, 0)
+        header = QHBoxLayout()
+        self.name = QLineEdit(); self.name.setPlaceholderText("Sensor name"); self.name.setAccessibleName("Sensor name")
+        header.addWidget(self.name, 1)
+        self.save = QPushButton("Save name"); header.addWidget(self.save)
+        self.favorite = QPushButton("☆ Favorite"); self.favorite.setCheckable(True); header.addWidget(self.favorite)
+        d.addLayout(header)
+        self.last_seen = QLabel(); self.last_seen.setObjectName("muted"); d.addWidget(self.last_seen)
+        cards = QHBoxLayout(); self.cards = {}
+        for field, title in (("temperature", "Temperature"), ("humidity", "Humidity"), ("pressure", "Pressure")):
+            card = QFrame(); card.setObjectName("card"); c = QVBoxLayout(card)
+            c.addWidget(QLabel(title)); number = QLabel("—"); number.setObjectName("reading"); c.addWidget(number)
+            cards.addWidget(card); self.cards[field] = number
+        d.addLayout(cards)
+        chart_header = QHBoxLayout(); chart_header.addWidget(QLabel("Collected history · last 24 hours"), 1)
+        self.metric_picker = QComboBox()
+        for label, field in (("Temperature", "temperature"), ("Humidity", "humidity"), ("Pressure", "pressure")):
+            self.metric_picker.addItem(label, field)
+        chart_header.addWidget(self.metric_picker); d.addLayout(chart_header)
+        self.chart = HistoryChart(); d.addWidget(self.chart, 1)
+        self.history_note = QLabel(); self.history_note.setObjectName("muted"); d.addWidget(self.history_note)
+        self.secondary = QLabel(); self.secondary.setWordWrap(True); d.addWidget(self.secondary)
+        self.identity = QLabel(); self.identity.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse); self.identity.setObjectName("muted"); d.addWidget(self.identity)
+        self.pages.addWidget(details)
+        split.setSizes([260, 780])
+        footer = QHBoxLayout()
+        self.status = QLabel("Demo data · Bluetooth is disabled" if demo else "Starting Bluetooth…")
+        self.status.setWordWrap(True); footer.addWidget(self.status, 1)
+        self.pause = QPushButton("Pause scanning"); self.pause.setEnabled(not demo); footer.addWidget(self.pause)
+        outer.addLayout(footer)
+        self.setStyleSheet("""
+            QLabel#title { font-size: 24px; font-weight: 600; }
+            QLabel#reading { font-size: 27px; font-weight: 600; }
+            QLabel#muted { color: #8a949e; }
+            QFrame#card { border: 1px solid #52756e; border-radius: 10px; padding: 15px; }
+            QLineEdit { padding: 8px; font-size: 20px; }
+            QPushButton { padding: 7px 12px; }
+            QListWidget { border: 0; }
+            QListWidget::item { padding: 12px 6px; }
+        """)
+        self.list.currentItemChanged.connect(self.select_item)
+        self.only_favorites.toggled.connect(self.refresh_list)
+        self.save.clicked.connect(self.rename)
+        self.name.returnPressed.connect(self.rename)
+        self.favorite.clicked.connect(self.set_favorite)
+        self.metric_picker.currentIndexChanged.connect(self.refresh_detail)
+        self.pause.clicked.connect(self.toggle_scan)
+        self.timer = QTimer(self); self.timer.timeout.connect(self.refresh_detail); self.timer.start(5000)
+        self.demo_timer = None
+        if demo:
+            self.seed_demo()
+            self.demo_timer = QTimer(self); self.demo_timer.timeout.connect(self.update_demo); self.demo_timer.start(2000)
+        self.refresh_list()
+        if start_scanning and not demo:
+            QTimer.singleShot(0, self.start_scan)
+
+    def start_scan(self):
+        if self.closing or (self.worker and self.worker.isRunning()):
+            return
+        self.status.setText("Starting Bluetooth…")
+        self.pause.setText("Pause scanning"); self.pause.setEnabled(True)
+        self.worker = ScannerWorker(adapter=self.adapter, parent=self)
+        self.worker.reading_received.connect(self.receive)
+        self.worker.status_changed.connect(self.status.setText)
+        self.worker.finished.connect(self.scan_finished)
+        self.worker.start()
+
+    def scan_finished(self):
+        if self.worker:
+            self.worker.deleteLater(); self.worker = None
+        self.pause.setEnabled(True); self.pause.setText("Resume scanning")
+        if self.closing:
+            self.close()
+
+    def toggle_scan(self):
+        if self.worker and self.worker.isRunning():
+            self.worker.stop(); self.status.setText("Stopping scan…")
+            self.pause.setEnabled(False)
+            # The finish signal will re-enable controls; BLE stop is asynchronous.
+            self.worker.finished.connect(lambda: self.status.setText("Scanning paused"))
+        else:
+            self.start_scan()
+
+    def receive(self, address, reading, rssi, now):
+        if self.closing:
+            return
+        try:
+            identity = self.store.receive(address, reading, rssi, now)
+            ids = [self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())]
+            if identity not in ids:
+                self.refresh_list()
+            # Update detail immediately; do not overwrite an in-progress name edit.
+            self.refresh_detail()
+        except sqlite3.Error as error:
+            self.status.setText(f"Could not save sensor data: {error}")
+
+    def refresh_list(self, *args):
+        current = self.selected
+        self.list.blockSignals(True)
+        self.list.clear()
+        for sensor in self.store.sensors(self.only_favorites.isChecked()):
+            item = QListWidgetItem(("★ " if sensor["favorite"] else "") + sensor["name"])
+            item.setData(Qt.ItemDataRole.UserRole, sensor["id"])
+            self.list.addItem(item)
+            if sensor["id"] == current:
+                self.list.setCurrentItem(item)
+        if self.list.currentItem() is None and self.list.count():
+            self.list.setCurrentRow(0)
+        self.list.blockSignals(False)
+        self.select_item(self.list.currentItem())
+
+    def select_item(self, item, previous=None):
+        self.selected = item.data(Qt.ItemDataRole.UserRole) if item else None
+        sensor = self.store.sensor(self.selected) if self.selected else None
+        self.pages.setCurrentIndex(1 if sensor else 0)
+        if sensor:
+            self.name.setText(sensor["name"])
+        self.refresh_detail()
+
+    def refresh_detail(self, *args):
+        if self.closing or not self.selected:
+            return
+        sensor = self.store.sensor(self.selected)
+        if not sensor:
+            return
+        r = sensor["latest"]; now = time.time()
+        self.cards["temperature"].setText(value(r["temperature"], "°C"))
+        self.cards["humidity"].setText(value(r["humidity"], "%"))
+        self.cards["pressure"].setText(value(r["pressure"], "hPa"))
+        self.favorite.setChecked(bool(sensor["favorite"]))
+        self.favorite.setText("★ Favorite" if sensor["favorite"] else "☆ Favorite")
+        age = max(0, int(now - sensor["last_seen"]))
+        self.last_seen.setText(f"{'No recent signal' if age > 30 else 'Nearby'} · last seen {age}s ago · {sensor['rssi']} dBm")
+        rows = self.store.history(self.selected, now)
+        self.chart.set_data(rows, self.metric_picker.currentData())
+        self.history_note.setText(f"{len(rows)} samples · up to one per minute · collected while awake and scanning")
+        movement = "—" if r["movement"] is None else str(r["movement"])
+        tx = "—" if r["tx_power"] is None else str(r["tx_power"])
+        self.secondary.setText(f"Battery {value(r['voltage'], 'V', 3)} · movement {movement} · TX {tx} dBm\n"
+            f"Acceleration: X {value(r['acceleration_x'], 'g', 3)} · Y {value(r['acceleration_y'], 'g', 3)} · Z {value(r['acceleration_z'], 'g', 3)}")
+        self.identity.setText(sensor["id"])
+
+    def rename(self):
+        if self.selected:
+            try:
+                self.store.rename(self.selected, self.name.text()); self.refresh_list()
+            except (ValueError, sqlite3.Error) as error:
+                QMessageBox.warning(self, "Could not save name", str(error))
+
+    def set_favorite(self, checked):
+        if self.selected:
+            try:
+                self.store.favorite(self.selected, checked); self.refresh_list()
+            except sqlite3.Error as error:
+                QMessageBox.warning(self, "Could not save favorite", str(error))
+
+    def seed_demo(self):
+        base = decode_rawv2(bytes.fromhex("0512FC5394C37C0004FFFC040CAC364200CDCBB8334C884F"))
+        now = time.time()
+        for index, (mac, name, offset) in enumerate((("CB:B8:33:4C:88:4F", "Living room", 0), ("CB:B8:33:4C:88:50", "Balcony", -7))):
+            for i in range(120):
+                reading = replace(base, mac=mac, temperature=22 + offset + math.sin(i/18)*1.2,
+                                  humidity=48 + math.sin(i/15)*5, sequence=i)
+                self.store.receive(mac, reading, -55-index*10, now-(119-i)*60)
+            self.store.rename(mac, name)
+        self.store.favorite("CB:B8:33:4C:88:4F", True)
+        self.demo_sequence = 120
+
+    def update_demo(self):
+        base = decode_rawv2(bytes.fromhex("0512FC5394C37C0004FFFC040CAC364200CDCBB8334C884F"))
+        for index, mac in enumerate(("CB:B8:33:4C:88:4F", "CB:B8:33:4C:88:50")):
+            reading = replace(base, mac=mac, temperature=22-index*7+math.sin(self.demo_sequence/18)*1.2,
+                              humidity=48+math.sin(self.demo_sequence/15)*5, sequence=self.demo_sequence)
+            self.receive(mac, reading, -55-index*10, time.time())
+        self.demo_sequence += 1
+
+    def closeEvent(self, event):
+        if self.worker and self.worker.isRunning():
+            self.closing = True; self.timer.stop()
+            self.worker.stop(); self.status.setText("Stopping Bluetooth before closing…")
+            self.pause.setEnabled(False); event.ignore()
+            return
+        self.closing = True
+        self.timer.stop()
+        if self.demo_timer:
+            self.demo_timer.stop()
+        self.store.close()
+        event.accept()

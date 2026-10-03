@@ -1,0 +1,27 @@
+name: Linux checks
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Qt runtime libraries
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 libgl1 desktop-file-utils
+      - name: Install app and test tools
+        run: python -m pip install '.[dev]' uv
+      - name: Test protocol, persistence, scanner and GUI
+        run: python -m pytest -q
+      - name: Render demo desktop
+        run: ruuvilinux --smoke-test --screenshot /tmp/ruuvilinux-demo.png
+      - name: Build source and wheel packages
+        run: python -m build
+      - name: Test Linux installer and desktop entry
+        run: |
+          XDG_DATA_HOME="$RUNNER_TEMP/ruuvilinux-install" ./scripts/install-omarchy.sh
+          desktop-file-validate "$RUNNER_TEMP/ruuvilinux-install/applications/org.ruuvilinux.app.desktop"
+          ~/.local/bin/ruuvilinux --smoke-test
