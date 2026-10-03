@@ -1,6 +1,6 @@
 # Validation — October 3, 2026
 
-## Automated checks
+## Automated checks (v0.1)
 
 - Local macOS development environment: 42 tests passed, headless Qt demo rendered,
   source archive and platform-independent Python wheel built.
@@ -46,4 +46,12 @@ failure / shutdown paths and do not establish those additional radio behaviors.
   subscription rejection are covered.
 - Credentials/TLS setup is unit tested; a production authenticated/TLS broker
   was not used. Passwords are session-only.
-- CI now includes a Mosquitto broker integration test.
+- Ubuntu CI passed all 62 tests including Mosquitto, plus the installer,
+  desktop entry, demo rendering and package build:
+  [v0.2 CI run](https://github.com/tonibergholm/RuuviLinux/actions/runs/37107548394).
+- Omarchy installation upgraded to v0.2 and restarted in its Wayland desktop.
+  The installed app received actual Gateway and Bridge messages over a
+  temporary SSH-forwarded test broker, preserved retained-message age,
+  converted pressure and shared the sensor identity. The test used an
+  in-memory database; the normal app keeps the existing sensor database and
+  resumes Bluetooth. No broker or collector service was installed.
