@@ -1,5 +1,31 @@
 # Validation — October 3, 2026
 
+## Background collector v0.4 — current installation
+
+- All 79 tests passed locally and in Ubuntu CI, including a real MQTT broker,
+  collector control socket, single collector ownership, bounded pause leases,
+  shared GUI/history-download coordination and window reuse. Packaging,
+  installation and demo checks also passed:
+  [v0.4 CI run](https://github.com/tonibergholm/RuuviLinux/actions/runs/37119475497).
+- Installed and enabled `ruuvilinux-collector.service` on the actual Omarchy
+  machine. Fresh BLE readings and additional history samples arrived while
+  no RuuviLinux desktop process was running. The collector uses no Qt window.
+- The native RuuviOmarchy dropdown rendered with live readings and shared names
+  and favorites. Activating its launcher with Enter opened the desktop GUI,
+  whose footer confirmed attachment to the background collector. Activating
+  the launcher again reused the same process and window.
+- Closing that GUI through the compositor removed its window while the
+  collector remained active. The user service is enabled for login.
+- Existing tag-memory downloads remain available. Coordination with the new
+  daemon is covered by a simulated transfer; another physical tag-memory
+  transfer was not repeated for v0.4. The successful physical v0.3 transfer
+  is recorded below.
+- Collection requires an awake machine and logged-in user. Extended unattended
+  operation, suspend/wake and production MQTT TLS credentials remain untested.
+
+The sections below record earlier versions, including their deployment state
+at the time. The v0.4 service replaces the earlier GUI-only collection setup.
+
 ## Automated checks (v0.1)
 
 - Local macOS development environment: 42 tests passed, headless Qt demo rendered,
