@@ -180,7 +180,7 @@ def main(argv=None):
     ha.add_argument("--ha-host",default=env("HOST") or None,help="MQTT broker used by Home Assistant")
     ha.add_argument("--ha-port",type=int,default=env("PORT","1883"))
     ha.add_argument("--ha-username",default=env("USERNAME"))
-    ha.add_argument("--ha-tls",action="store_true",default=env("TLS").lower() in ("1","true","yes","on"))
+    ha.add_argument("--ha-tls",action="store_true",default=None)
     ha.add_argument("--ha-discovery-prefix",default=env("DISCOVERY_PREFIX","homeassistant"))
     ha.add_argument("--ha-base-topic",default=env("BASE_TOPIC","ruuvilinux"))
     ha.add_argument("--ha-interval",type=float,default=env("INTERVAL","60"),help="Minimum seconds between state updates per tag")
@@ -188,6 +188,12 @@ def main(argv=None):
     ha.add_argument("--ha-node-id",default=env("NODE_ID"),help="Availability name for this collector (default: hostname and database)")
     ha.add_argument("--ha-status-topic",default=env("STATUS_TOPIC","homeassistant/status"),help="Home Assistant birth message topic")
     args=parser.parse_args(argv)
+    if args.ha_tls is None:
+        # A misspelt value must not silently send broker credentials without TLS.
+        tls=env("TLS").strip().lower()
+        if tls in ("1","true","yes","on"): args.ha_tls=True
+        elif tls in ("","0","false","no","off"): args.ha_tls=False
+        else: parser.error("RUUVILINUX_HA_TLS must be true or false.")
     settings=None;ha_settings=None
     if args.mqtt_host:
         settings=MQTTSettings(args.mqtt_host,args.mqtt_port,args.mqtt_topic,args.mqtt_username,os.environ.get("RUUVILINUX_MQTT_PASSWORD",""),args.mqtt_tls)

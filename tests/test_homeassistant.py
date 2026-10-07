@@ -265,3 +265,40 @@ def test_denied_birth_subscription_reports_actionable_status():
     ha.on_subscribe(ha.client,None,1,[OK],None);assert statuses[-1]=='Home Assistant · publishing'
     ha.on_subscribe(ha.client,None,1,[SimpleNamespace(is_failure=True)],None)
     assert 'denied reading homeassistant/status' in statuses[-1]
+
+
+def test_collector_id_separates_cloned_machines(tmp_path):
+    first,second=tmp_path/'machine-a',tmp_path/'machine-b'
+    first.write_text('a'*32+'\n');second.write_text('b'*32+'\n')
+    database=tmp_path/'sensors.db'
+    assert collector_id(database,first)!=collector_id(database,second)
+    assert collector_id(database,first)==collector_id(database,first)
+    assert collector_id(database,tmp_path/'missing')==collector_id(database,tmp_path/'missing')
+
+
+def test_future_source_timestamps_do_not_extend_freshness():
+    wall=[1_700_000_000.0];ha,clock=publisher(wall=wall,expire_after=120,interval=60)
+    ha.on_connect(ha.client,None,None,OK,None)
+    ha.publish(READING.mac,'Kitchen',READING,-60,wall[0]+299)  # source clock ahead, accepted by MQTT input
+    assert json.loads(ha.client.published[-1][1])['last_seen']=='2023-11-14T22:18:19+00:00'  # source time kept
+    wall[0]+=240;ha.client.published.clear()
+    ha.on_disconnect(ha.client,None,None,OK,None);ha.on_connect(ha.client,None,None,OK,None)
+    assert 'ruuvilinux/cbb8334c884f/state' not in ha.client.topics()
+
+
+@pytest.mark.parametrize('value,expected',[('true',True),('ON',True),('1',True),('false',False),('no',False),('',False)])
+def test_tls_environment_values(monkeypatch,value,expected):
+    import ruuvilinux.collector as collector
+    captured={}
+    monkeypatch.setattr(collector,'asyncio',SimpleNamespace(run=lambda coroutine:(coroutine.close(),None)[1]))
+    original=collector.HomeAssistantSettings
+    monkeypatch.setattr(collector,'HomeAssistantSettings',lambda *a:captured.setdefault('s',original(*a)))
+    monkeypatch.setenv('RUUVILINUX_HA_HOST','ha.local');monkeypatch.setenv('RUUVILINUX_HA_TLS',value)
+    assert collector.main([])==0 and captured['s'].tls is expected
+    assert collector.main(['--ha-tls'])==0
+
+
+def test_misspelt_tls_environment_value_is_rejected(monkeypatch,capsys):
+    monkeypatch.setenv('RUUVILINUX_HA_HOST','ha.local');monkeypatch.setenv('RUUVILINUX_HA_TLS','treu')
+    with pytest.raises(SystemExit):collector_main([])
+    assert 'RUUVILINUX_HA_TLS must be true or false' in capsys.readouterr().err

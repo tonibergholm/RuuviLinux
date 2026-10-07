@@ -34,10 +34,15 @@ def topic_id(identity):
     return re.sub(r"[^0-9a-z]", "", identity.lower()) or "unknown"
 
 
-def collector_id(database):
-    """Stable per-collector name, so collectors sharing a broker keep separate availability."""
+def collector_id(database, machine_id_path="/etc/machine-id"):
+    """Stable per-collector name, so collectors sharing a broker keep separate availability.
+
+    The machine ID separates cloned installs with the same hostname and database path."""
     host = re.sub(r"[^0-9a-z_-]", "", socket.gethostname().lower())[:40] or "host"
-    return host + "_" + hashlib.sha256(str(Path(database).expanduser().resolve()).encode()).hexdigest()[:8]
+    try: machine = Path(machine_id_path).read_text().strip()
+    except OSError: machine = ""
+    identity = machine + "\0" + str(Path(database).expanduser().resolve())
+    return host + "_" + hashlib.sha256(identity.encode()).hexdigest()[:8]
 
 
 @dataclass
@@ -138,9 +143,11 @@ class HomeAssistantPublisher:
         state = {key: value for key, value in asdict(reading).items() if key != "mac"}
         state.update(rssi=rssi, last_seen=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(stamp)))
         with self.lock:
-            sensor = self.sensors.setdefault(identity, {"name": name, "state": None, "announced": None, "sent": None, "stamp": None})
+            sensor = self.sensors.setdefault(identity, {"name": name, "state": None, "announced": None, "sent": None, "stamp": None, "seen": None})
             if sensor["stamp"] is not None and stamp <= sensor["stamp"]: return  # stale / retained duplicates
-            sensor.update(name=name, state=state, stamp=stamp)
+            # MQTT input accepts source clocks slightly ahead; judge freshness by
+            # when the reading could have been received at the latest.
+            sensor.update(name=name, state=state, stamp=stamp, seen=min(stamp, self.wall()))
         self.flush(identity)
 
     def flush(self, identity, force=False):
@@ -151,7 +158,7 @@ class HomeAssistantPublisher:
             # Home Assistant restarts expire_after on every message, so an
             # expired reading must never be resent (reconnect, birth or late input).
             expiry = self.settings.expire_after
-            fresh = not expiry or self.wall() - sensor["stamp"] < expiry
+            fresh = not expiry or self.wall() - sensor["seen"] < expiry
             now = self.clock()
             due = fresh and (force or announce or sensor["sent"] is None or now - sensor["sent"] >= self.settings.interval)
             if not (due or announce): return
