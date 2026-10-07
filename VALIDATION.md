@@ -1,6 +1,23 @@
-# Validation — October 3, 2026
+# Validation — October 7, 2026
 
-## Background collector v0.4 — current installation
+## Home Assistant v0.5
+
+- All 96 tests passed locally with a real Mosquitto 2.1.2 broker, including a
+  collector process publishing retained discovery, state and availability
+  messages, and republishing discovery after a Home Assistant birth message.
+- End-to-end on a temporary Home Assistant 2026.9.4 container with its MQTT
+  integration: a Gateway-format reading delivered to the collector created one
+  device with temperature (24.3 °C), humidity (53.49 %), pressure
+  (1000.44 hPa), battery voltage, signal strength, movement counter and
+  last-seen sensors with the expected device classes and units. Renaming the
+  tag in RuuviLinux renamed the Home Assistant device on the next reading.
+  Stopping the collector made every entity unavailable.
+- The test used a temporary database and broker. The installed collector and
+  its database were not modified, and no Home Assistant installation was
+  configured on this machine. Authenticated/TLS brokers, Home Assistant OS
+  add-ons and long unattended publishing remain untested.
+
+## Background collector v0.4 — October 3, 2026
 
 - All 79 tests passed locally and in Ubuntu CI, including a real MQTT broker,
   collector control socket, single collector ownership, bounded pause leases,

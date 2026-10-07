@@ -12,6 +12,8 @@ Description=RuuviTag background BLE and MQTT collector
 
 [Service]
 Type=simple
+# Optional private settings, e.g. RUUVILINUX_HA_HOST for Home Assistant.
+EnvironmentFile=-%h/.config/ruuvilinux/collector.env
 ExecStart="{path}"
 Restart=on-failure
 RestartSec=5

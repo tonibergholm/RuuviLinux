@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ruuvilinux"
-version = "0.4.0"
-description = "Native desktop RuuviTag viewer for Omarchy and Linux"
+version = "0.5.0"
+description = "Native desktop RuuviTag viewer and Home Assistant bridge for Omarchy and Linux"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

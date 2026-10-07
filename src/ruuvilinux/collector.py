@@ -11,6 +11,7 @@ import sqlite3
 import time
 from bleak import BleakScanner
 from .collector_client import control_path
+from .homeassistant import HomeAssistantPublisher, HomeAssistantSettings
 from .mqtt_backend import MQTTSettings, MQTTTransport
 from .protocol import decode_advertisement
 from .storage import Store, data_path
@@ -19,19 +20,27 @@ LOG = logging.getLogger("ruuvilinux.collector")
 
 
 class Collector:
-    def __init__(self, database, adapter=None, scanner_factory=BleakScanner, mqtt_factory=MQTTTransport):
+    def __init__(self, database, adapter=None, scanner_factory=BleakScanner, mqtt_factory=MQTTTransport,
+                 ha_factory=HomeAssistantPublisher):
         self.database=database;self.adapter=adapter
-        self.scanner_factory=scanner_factory;self.mqtt_factory=mqtt_factory
+        self.scanner_factory=scanner_factory;self.mqtt_factory=mqtt_factory;self.ha_factory=ha_factory
+        self.ha=None;self.ha_status=""
         self.paused=False;self.mqtt_settings=None;self.status="Starting collector…"
         self.task=None;self.mqtt=None;self.lease=None;self.loop=None;self.store=None
         self.control_lock=asyncio.Lock()
 
     def report(self):
         return {"running": True, "paused": self.paused,
-                "source": "mqtt" if self.mqtt_settings else "bluetooth", "status": self.status}
+                "source": "mqtt" if self.mqtt_settings else "bluetooth", "status": self.status,
+                "homeassistant": {"enabled": self.ha is not None, "status": self.ha_status}}
 
     def ingest(self, identity, reading, rssi, stamp):
-        try: self.store.receive(identity,reading,rssi,stamp)
+        try:
+            identity=self.store.receive(identity,reading,rssi,stamp)
+            if self.ha:
+                sensor=self.store.sensor(identity)
+                # The store rejects stale/retained repeats; only publish what it accepted.
+                if sensor and sensor["last_seen"]==stamp: self.ha.publish(identity,sensor["name"],reading,rssi,stamp)
         except sqlite3.Error:
             self.status="Could not save collector readings. Check database access."
             LOG.warning("Could not save a reading")
@@ -128,7 +137,13 @@ class Collector:
         finally:
             writer.close();await writer.wait_closed()
 
-    async def run(self, stop, mqtt_settings=None):
+    def start_homeassistant(self, settings):
+        def status(message):
+            self.loop.call_soon_threadsafe(lambda:setattr(self,"ha_status",message) if self.ha is publisher else None)
+        publisher=self.ha_factory(settings,status)
+        self.ha=publisher;publisher.start()
+
+    async def run(self, stop, mqtt_settings=None, ha_settings=None):
         self.loop=asyncio.get_running_loop();self.store=Store(self.database)
         path=control_path(self.database)
         lock_path=Path(str(path)+".lock")
@@ -139,6 +154,7 @@ class Collector:
             path.unlink(missing_ok=True)
             server=await asyncio.start_unix_server(self.client,path=str(path),limit=16384)
             os.chmod(path,0o600)
+            if ha_settings: self.start_homeassistant(ha_settings)
             self.mqtt_settings=mqtt_settings;self.start_input()
             LOG.info("Background collector started")
             try:
@@ -146,6 +162,7 @@ class Collector:
             finally:
                 if self.lease: self.lease.cancel()
                 await self.stop_input();path.unlink(missing_ok=True)
+                if self.ha: self.ha.stop();self.ha=None
         finally:
             lock.close();self.store.close()
         LOG.info("Background collector stopped")
@@ -160,16 +177,32 @@ def main(argv=None):
     parser.add_argument("--mqtt-topic",default="ruuvi/#")
     parser.add_argument("--mqtt-username",default="")
     parser.add_argument("--mqtt-tls",action="store_true")
+    env=lambda name,default="":os.environ.get("RUUVILINUX_HA_"+name,default)
+    ha=parser.add_argument_group("Home Assistant","Publish readings with MQTT discovery. Defaults come from RUUVILINUX_HA_* variables; the password only from RUUVILINUX_HA_PASSWORD.")
+    ha.add_argument("--ha-host",default=env("HOST") or None,help="MQTT broker used by Home Assistant")
+    ha.add_argument("--ha-port",type=int,default=env("PORT","1883"))
+    ha.add_argument("--ha-username",default=env("USERNAME"))
+    ha.add_argument("--ha-tls",action="store_true",default=env("TLS").lower() in ("1","true","yes","on"))
+    ha.add_argument("--ha-discovery-prefix",default=env("DISCOVERY_PREFIX","homeassistant"))
+    ha.add_argument("--ha-base-topic",default=env("BASE_TOPIC","ruuvilinux"))
+    ha.add_argument("--ha-interval",type=float,default=env("INTERVAL","60"),help="Minimum seconds between state updates per tag")
+    ha.add_argument("--ha-expire-after",type=int,default=env("EXPIRE_AFTER","300"),help="Seconds without readings before entities are unavailable; 0 disables")
     args=parser.parse_args(argv)
-    settings=None
+    settings=None;ha_settings=None
     if args.mqtt_host:
         settings=MQTTSettings(args.mqtt_host,args.mqtt_port,args.mqtt_topic,args.mqtt_username,os.environ.get("RUUVILINUX_MQTT_PASSWORD",""),args.mqtt_tls)
-        settings.validate()
+        try: settings.validate()
+        except ValueError as error: parser.error(str(error))
+    if args.ha_host:
+        ha_settings=HomeAssistantSettings(args.ha_host,args.ha_port,args.ha_username,os.environ.get("RUUVILINUX_HA_PASSWORD",""),
+            args.ha_tls,args.ha_discovery_prefix,args.ha_base_topic,args.ha_interval,args.ha_expire_after)
+        try: ha_settings.validate()
+        except ValueError as error: parser.error(str(error))
     logging.basicConfig(level=logging.INFO,format="%(levelname)s %(message)s")
     async def run():
         stop=asyncio.Event();loop=asyncio.get_running_loop()
         for sig in (signal.SIGINT,signal.SIGTERM):loop.add_signal_handler(sig,stop.set)
-        await Collector(args.database,args.adapter).run(stop,settings)
+        await Collector(args.database,args.adapter).run(stop,settings,ha_settings)
     try: asyncio.run(run())
     except (RuntimeError,OSError) as error:
         LOG.error("%s",error);return 1

@@ -141,7 +141,8 @@ class MainWindow(QMainWindow):
         if not self.collector_active or self.closing: return
         try:
             self.collector_state = collector_request(self.store.path)
-            self.status.setText(self.collector_state["status"])
+            ha=self.collector_state.get("homeassistant") or {}
+            self.status.setText(self.collector_state["status"]+(" · "+ha["status"] if ha.get("enabled") and ha.get("status") else ""))
             busy = bool(self.log_worker or self.pending_log)
             self.pause.setEnabled(not busy)
             self.pause.setText("Use Bluetooth" if self.collector_state["source"] == "mqtt" else
