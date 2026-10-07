@@ -15,8 +15,9 @@ An independent, open-source **native Qt desktop app** for RuuviTags on Omarchy /
 - Pause / resume scanning, actionable Bluetooth error messages, safe asynchronous shutdown.
 - Native desktop launcher for Omarchy's **Super + Space** menu.
 - Demo mode with generated data; demo never accesses your sensor database or Bluetooth.
+- [Home Assistant](https://www.home-assistant.io/) sensors through MQTT discovery, published by the background collector.
 
-Supports **RuuviTag RAWv2 / format 5** only in v0.4. Ruuvi Air, legacy formats, cloud sync, alerts, firmware updates are outside this release.
+Supports **RuuviTag RAWv2 / format 5** only in v0.5. Ruuvi Air, legacy formats, cloud sync, alerts, firmware updates are outside this release.
 
 ## Install on Omarchy / Arch
 
@@ -70,6 +71,29 @@ Linux also accepts `--mqtt-host`, `--mqtt-port`, `--mqtt-topic`, `--mqtt-usernam
 ruuvilinux --mqtt-host broker.example.com --mqtt-port 8883 --mqtt-tls --mqtt-topic 'ruuvi/#'
 ```
 
+## Home Assistant (v0.5)
+
+The background collector can publish every RuuviTag it receives to [Home Assistant](https://www.home-assistant.io/) using [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery). Each tag appears as one device with temperature, humidity, pressure, battery voltage, signal strength, movement counter and last-seen sensors; acceleration and TX power are added disabled. Your Linux computer's Bluetooth becomes a Ruuvi receiver for Home Assistant, and readings arriving through MQTT input are forwarded the same way.
+
+Home Assistant needs its [MQTT integration](https://www.home-assistant.io/integrations/mqtt/) connected to a broker, for example the Mosquitto add-on or `sudo pacman -S mosquitto`. Create `~/.config/ruuvilinux/collector.env` (under `$XDG_CONFIG_HOME` instead if you set it before installing), readable only by you:
+
+```sh
+mkdir -p ~/.config/ruuvilinux
+install -m 600 /dev/null ~/.config/ruuvilinux/collector.env
+cat > ~/.config/ruuvilinux/collector.env <<'ENV'
+RUUVILINUX_HA_HOST=homeassistant.local
+RUUVILINUX_HA_USERNAME=ruuvilinux
+RUUVILINUX_HA_PASSWORD=your-broker-password
+ENV
+systemctl --user restart ruuvilinux-collector.service
+```
+
+Optional variables: `RUUVILINUX_HA_PORT` (default `1883`), `RUUVILINUX_HA_TLS=true` (system-trusted certificates, commonly port 8883; values other than true/false stop the collector rather than falling back to plain MQTT), `RUUVILINUX_HA_DISCOVERY_PREFIX` (default `homeassistant`), `RUUVILINUX_HA_BASE_TOPIC` (default `ruuvilinux`), `RUUVILINUX_HA_INTERVAL` (minimum seconds between updates per tag, default `60`; `0` publishes every reading), `RUUVILINUX_HA_EXPIRE_AFTER` (seconds without readings before a tag's sensors become unavailable, default `300`; `0` disables; must be at least twice the interval) `RUUVILINUX_HA_NODE_ID` (this collector's availability name; defaults to the hostname plus a database hash) and `RUUVILINUX_HA_STATUS_TOPIC` (Home Assistant's birth message topic, default `homeassistant/status`; it is configured separately from the discovery prefix). The same settings are available as `ruuvilinux-collector --ha-host …` flags; the password is only read from `RUUVILINUX_HA_PASSWORD`. The installer keeps this file; re-running it does not overwrite your settings.
+
+The desktop app footer shows the publishing status. Device names follow RuuviLinux names: renaming a tag in the app updates Home Assistant with the next reading, unless you renamed it in Home Assistant. Discovery and availability messages are retained. With expiry enabled, state is sent unretained at QoS 0, because a replayed or resent old state would make an expired tag look available again; the collector resends current state after Home Assistant's birth message instead. With `RUUVILINUX_HA_EXPIRE_AFTER=0`, state is retained on a separate `…/state/retained` topic. Readings older than the expiry window are never sent. When the collector stops, an MQTT last will marks every RuuviLinux sensor unavailable; when Home Assistant restarts, its birth message (`homeassistant/status`) triggers rediscovery. Topics are `homeassistant/device/ruuvilinux_<mac>/config`, `ruuvilinux/<mac>/state` and `ruuvilinux/collectors/<node>/status`. Each collector has its own availability topic, so several computers can share a broker. Publish each tag from one collector only: discovery is keyed by the tag, so collectors publishing the same tag overwrite each other's configuration and availability.
+
+Publishing is independent of the input source and continues while tag-history downloads pause collection. Downloaded tag history stays in RuuviLinux; Home Assistant records only live readings. The standalone desktop app (no collector running) does not publish. To remove a device, delete it in Home Assistant's MQTT device page or clear its retained config topic. If Home Assistant runs on the same computer with its own [Bluetooth integration](https://www.home-assistant.io/integrations/bluetooth/), it shares the adapter with RuuviLinux; the built-in [Ruuvi BLE integration](https://www.home-assistant.io/integrations/ruuvitag_ble/) is an alternative that does not use RuuviLinux.
+
 ## Download stored RuuviTag history (v0.3)
 
 Select a sensor and press **Download tag history**. Bring the tag into Bluetooth range, and close any other app holding a connection to it. The app temporarily connects through Nordic UART Service, reads temperature, humidity and pressure, then disconnects. Its regular Bluetooth scanning resumes afterward; MQTT subscriptions can remain active. **Cancel history download** stops the operation. The chart switches to **Last 10 days**.
@@ -88,7 +112,7 @@ This needs connectable firmware with logging support. Longlife firmware may not 
 omarchy plugin add https://github.com/tonibergholm/RuuviOmarchy.git --enable
 ```
 
-The installer enables a separate **ruuvilinux-collector.service** user daemon. It collects BLE readings and writes history even when the desktop app is closed. The plugin reads that same database without writing to it. The GUI uses the daemon when available, and a local single-instance guard reopens its existing window. It pauses the daemon briefly for tag-history downloads and resumes afterward; a six-minute pause lease also recovers if the GUI crashes. Demo and smoke-test runs remain isolated. With no daemon running, the app can still scan on its own.
+The installer enables a separate **ruuvilinux-collector.service** user daemon. It collects BLE readings, writes history and publishes to Home Assistant when configured, even when the desktop app is closed. The plugin reads that same database without writing to it. The GUI uses the daemon when available, and a local single-instance guard reopens its existing window. It pauses the daemon briefly for tag-history downloads and resumes afterward; a six-minute pause lease also recovers if the GUI crashes. Demo and smoke-test runs remain isolated. With no daemon running, the app can still scan on its own.
 
 Manage the service with:
 
@@ -102,7 +126,7 @@ journalctl --user -u ruuvilinux-collector.service
 
 The collector uses asyncio/Bleak/Paho and SQLite; it imports no Qt or window code. It retries unavailable Bluetooth, reopens discovery periodically to recover adapter power cycles, and systemd restarts it after an unexpected exit. One collector owns each database. Its local control socket is user-only (0600), accepts bounded JSON and never returns broker passwords. Installation starts the daemon at login; sleep or logout can stop collection. It does not enable system-wide startup or user lingering.
 
-MQTT settings changed in the GUI apply to the daemon and continue collecting after the window closes. Settings and passwords remain in the daemon's memory for that session; restarting it defaults to Bluetooth. For unattended MQTT, create a user-service override with `systemctl --user edit ruuvilinux-collector.service`, clear `ExecStart=`, and set it to the installed `ruuvilinux-collector --mqtt-host HOST --mqtt-topic 'ruuvi/#'` with optional port, username and TLS flags. Supply `RUUVILINUX_MQTT_PASSWORD` through a private `EnvironmentFile` rather than a command-line argument. A custom database needs matching `--database /path/to/sensors.sqlite3` on the service, desktop app and plugin.
+MQTT settings changed in the GUI apply to the daemon and continue collecting after the window closes. Settings and passwords remain in the daemon's memory for that session; restarting it defaults to Bluetooth. For unattended MQTT input, create a user-service override with `systemctl --user edit ruuvilinux-collector.service`, clear `ExecStart=`, and set it to the installed `ruuvilinux-collector --mqtt-host HOST --mqtt-topic 'ruuvi/#'` with optional port, username and TLS flags. Supply `RUUVILINUX_MQTT_PASSWORD` through the private `~/.config/ruuvilinux/collector.env` file rather than a command-line argument. A custom database needs matching `--database /path/to/sensors.sqlite3` on the service, desktop app and plugin.
 
 ## History and storage
 
@@ -126,7 +150,7 @@ QT_QPA_PLATFORM=offscreen .venv/bin/ruuvilinux --smoke-test --screenshot /tmp/ru
 .venv/bin/python -m build
 ```
 
-Tests cover official protocol vectors and unavailable values, every truncated payload length, wrong manufacturers / unsupported formats, history deduplication / retention, name and favorite persistence, XDG paths, failed scanner startup / shutdown, advertisement dispatch, and GUI interactions. MQTT tests cover raw/Bridge messages, timestamps, authentication/TLS setup and subscription rejection. Set `RUUVILINUX_MQTT_TEST_PORT=18884` with a local broker on 127.0.0.1 to include real broker/GUI ingestion; otherwise that test is skipped. GitHub Actions includes this broker test on Ubuntu Linux.
+Tests cover official protocol vectors and unavailable values, every truncated payload length, wrong manufacturers / unsupported formats, history deduplication / retention, name and favorite persistence, XDG paths, failed scanner startup / shutdown, advertisement dispatch, and GUI interactions. MQTT tests cover raw/Bridge messages, timestamps, authentication/TLS setup and subscription rejection. Home Assistant tests cover discovery payloads, throttling, renames, birth-message rediscovery, availability and environment settings. Set `RUUVILINUX_MQTT_TEST_PORT=18884` with a local broker on 127.0.0.1 to include real broker/GUI ingestion and Home Assistant publishing from the collector process; otherwise that test is skipped. GitHub Actions includes this broker test on Ubuntu Linux.
 
 Real RAWv2 discovery and local history have also been verified on an Omarchy / Hyprland machine. See `VALIDATION.md` for exact coverage and remaining checks. Hardware smoke test on Omarchy: discover a real RAWv2 tag, compare readings with Ruuvi Station, rename/favorite, wait for minute samples, relaunch, pause/resume, move out of range, turn Bluetooth off/on, and close while scanning.
 

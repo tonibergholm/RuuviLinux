@@ -34,10 +34,14 @@ class Store:
         """)
 
     def receive(self, address: str, reading: Reading, rssi: int, now: float) -> str:
+        return self.record(address, reading, rssi, now)[0]
+
+    def record(self, address: str, reading: Reading, rssi: int, now: float) -> tuple[str, bool]:
+        """Store a reading; also report whether it was newer than the saved one."""
         identity = reading.mac or address.upper()
         existing=self.db.execute("SELECT last_seen FROM sensors WHERE id=?",(identity,)).fetchone()
         if existing and now<=existing["last_seen"]:
-            return identity  # stale / repeated retained messages never refresh freshness
+            return identity, False  # stale / repeated retained messages never refresh freshness
         with self.db:
             self.db.execute("""INSERT INTO sensors(id,name,last_seen,rssi,latest)
                 VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
@@ -52,7 +56,7 @@ class Store:
             self.db.execute("DELETE FROM readings WHERE time < ?", (now - RETENTION,))
             self.db.execute("""DELETE FROM readings WHERE sensor_id=? AND id NOT IN
                 (SELECT id FROM readings WHERE sensor_id=? ORDER BY time DESC,id DESC LIMIT 14400)""", (identity, identity))
-        return identity
+        return identity, True
 
     def sensors(self, favorites_only: bool = False) -> list[dict]:
         rows = self.db.execute("SELECT * FROM sensors WHERE (?=0 OR favorite=1) ORDER BY favorite DESC,name COLLATE NOCASE,id", (int(favorites_only),))
