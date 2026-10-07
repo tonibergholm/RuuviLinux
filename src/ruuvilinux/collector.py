@@ -36,11 +36,9 @@ class Collector:
 
     def ingest(self, identity, reading, rssi, stamp):
         try:
-            identity=self.store.receive(identity,reading,rssi,stamp)
-            if self.ha:
-                sensor=self.store.sensor(identity)
-                # The store rejects stale/retained repeats; only publish what it accepted.
-                if sensor and sensor["last_seen"]==stamp: self.ha.publish(identity,sensor["name"],reading,rssi,stamp)
+            identity,accepted=self.store.record(identity,reading,rssi,stamp)
+            # The store rejects stale/retained repeats; only publish what it accepted.
+            if self.ha and accepted: self.ha.publish(identity,self.store.sensor(identity)["name"],reading,rssi,stamp)
         except sqlite3.Error:
             self.status="Could not save collector readings. Check database access."
             LOG.warning("Could not save a reading")

@@ -60,8 +60,8 @@ class HomeAssistantSettings:
 
 class HomeAssistantPublisher:
     """Thread-safe: publish() may be called from asyncio, paho callbacks run on paho's thread."""
-    def __init__(self, settings, on_status=lambda message: None, client_factory=mqtt.Client, clock=time.monotonic):
-        settings.validate(); self.settings = settings; self.on_status = on_status; self.clock = clock
+    def __init__(self, settings, on_status=lambda message: None, client_factory=mqtt.Client, clock=time.monotonic, wall=time.time):
+        settings.validate(); self.settings = settings; self.on_status = on_status; self.clock = clock; self.wall = wall
         self.running = False; self.connected = False; self.lock = threading.Lock()
         self.sensors = {}  # identity -> {"name", "state", "announced", "sent"}
         self.availability = f"{settings.base_topic}/collector/status"
@@ -123,15 +123,22 @@ class HomeAssistantPublisher:
             sensor = self.sensors.get(identity)
             if not self.connected or not sensor or sensor["state"] is None: return
             announce = sensor["announced"] != sensor["name"]
+            # Home Assistant restarts expire_after on every message, so an
+            # expired reading must never be resent (reconnect, birth or late input).
+            expiry = self.settings.expire_after
+            fresh = not expiry or self.wall() - sensor["stamp"] < expiry
             now = self.clock()
-            due = force or announce or sensor["sent"] is None or now - sensor["sent"] >= self.settings.interval
-            if not due: return
-            sensor["sent"] = now
+            due = fresh and (force or announce or sensor["sent"] is None or now - sensor["sent"] >= self.settings.interval)
+            if not (due or announce): return
+            if due: sensor["sent"] = now
             if announce: sensor["announced"] = sensor["name"]
             name, state = sensor["name"], dict(sensor["state"])
         if announce:
             self.client.publish(self.discovery_topic(identity), json.dumps(self.discovery(identity, name)), qos=1, retain=True)
-        self.client.publish(self.state_topic(identity), json.dumps(state, allow_nan=False), qos=1, retain=True)
+        if due:
+            # Retained state would revive expired sensors when replayed, so it is
+            # only retained when expiry is disabled. Birth messages resend it instead.
+            self.client.publish(self.state_topic(identity), json.dumps(state, allow_nan=False), qos=1, retain=not expiry)
 
     def discovery_topic(self, identity):
         return f"{self.settings.discovery_prefix}/device/ruuvilinux_{topic_id(identity)}/config"

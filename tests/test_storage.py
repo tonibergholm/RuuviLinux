@@ -66,3 +66,13 @@ def test_xdg_location(monkeypatch,tmp_path):
 def test_corrupt_database_is_reported(tmp_path):
     path = tmp_path / "invalid.db"; path.write_bytes(b"not a SQLite database")
     with pytest.raises(sqlite3.DatabaseError): Store(path)
+
+
+def test_record_reports_whether_reading_was_accepted():
+    store=Store(":memory:");reading=decode_rawv2(bytes.fromhex("0512FC5394C37C0004FFFC040CAC364200CDCBB8334C884F"))
+    assert store.record("tag",reading,-60,100)==(reading.mac,True)
+    assert store.record("tag",reading,-60,100)==(reading.mac,False)  # same timestamp, e.g. retained redelivery
+    assert store.record("tag",reading,-60,90)==(reading.mac,False)
+    assert store.record("tag",reading,-60,101)==(reading.mac,True)
+    assert store.receive("tag",reading,-60,102)==reading.mac
+    store.close()

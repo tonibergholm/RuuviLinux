@@ -31,9 +31,9 @@ class Client:
     def topics(self):return [p[0] for p in self.published]
 
 
-def publisher(**changes):
-    clock=[1000.0]
-    ha=HomeAssistantPublisher(HomeAssistantSettings('broker',**changes),client_factory=Client,clock=lambda:clock[0])
+def publisher(wall=None,**changes):
+    clock=[1000.0];wall=wall or [1_700_000_010.0]
+    ha=HomeAssistantPublisher(HomeAssistantSettings('broker',**changes),client_factory=Client,clock=lambda:clock[0],wall=lambda:wall[0])
     ha.start();return ha,clock
 
 
@@ -47,7 +47,7 @@ def test_discovery_waits_for_connection_and_describes_device():
     assert 'homeassistant/status' in ha.client.events
     topics=ha.client.topics()
     assert topics==['ruuvilinux/collector/status','homeassistant/device/ruuvilinux_cbb8334c884f/config','ruuvilinux/cbb8334c884f/state']
-    assert all(retain for _,_,retain in ha.client.published)
+    assert [retain for _,_,retain in ha.client.published]==[True,True,False]  # expiring state is not retained
     config=json.loads(ha.client.published[1][1])
     assert config['device']['name']=='Kitchen' and config['device']['connections']==[['bluetooth','cb:b8:33:4c:88:4f']]
     assert config['origin']['name']=='RuuviLinux' and config['availability_topic']=='ruuvilinux/collector/status'
@@ -67,29 +67,54 @@ def test_discovery_waits_for_connection_and_describes_device():
 
 def test_state_is_throttled_rename_rediscovers_and_stale_is_ignored():
     ha,clock=publisher(interval=60);ha.on_connect(ha.client,None,None,OK,None)
-    ha.publish(READING.mac,'Kitchen',READING,-60,100);count=len(ha.client.published)
-    clock[0]+=10;ha.publish(READING.mac,'Kitchen',replace(READING,temperature=25),-60,101)
+    ha.publish(READING.mac,'Kitchen',READING,-60,1_700_000_000);count=len(ha.client.published)
+    clock[0]+=10;ha.publish(READING.mac,'Kitchen',replace(READING,temperature=25),-60,1_700_000_001)
     assert len(ha.client.published)==count
-    clock[0]+=50;ha.publish(READING.mac,'Kitchen',replace(READING,temperature=26),-60,102)
+    clock[0]+=50;ha.publish(READING.mac,'Kitchen',replace(READING,temperature=26),-60,1_700_000_002)
     assert json.loads(ha.client.published[-1][1])['temperature']==26
-    clock[0]+=1;ha.publish(READING.mac,'Fridge',READING,-60,103)
+    clock[0]+=1;ha.publish(READING.mac,'Fridge',READING,-60,1_700_000_003)
     assert json.loads(ha.client.published[-2][1])['device']['name']=='Fridge'
     count=len(ha.client.published);clock[0]+=600
-    ha.publish(READING.mac,'Fridge',READING,-60,50)  # older retained/out-of-order sample
+    ha.publish(READING.mac,'Fridge',READING,-60,1_699_999_000)  # older retained/out-of-order sample
     assert len(ha.client.published)==count
 
 
 def test_home_assistant_restart_and_reconnect_republish_discovery():
     ha,clock=publisher();ha.on_connect(ha.client,None,None,OK,None)
-    ha.publish(READING.mac,'Kitchen',READING,-60,100);ha.client.published.clear()
+    ha.publish(READING.mac,'Kitchen',READING,-60,1_700_000_000);ha.client.published.clear()
     ha.on_message(ha.client,None,SimpleNamespace(topic='homeassistant/status',payload=b'offline'))
     assert ha.client.published==[]
     ha.on_message(ha.client,None,SimpleNamespace(topic='homeassistant/status',payload=b'online'))
     assert ha.client.topics()==['homeassistant/device/ruuvilinux_cbb8334c884f/config','ruuvilinux/cbb8334c884f/state']
     ha.on_disconnect(ha.client,None,None,OK,None);ha.client.published.clear()
-    ha.publish(READING.mac,'Kitchen',READING,-60,200);assert ha.client.published==[]
+    ha.publish(READING.mac,'Kitchen',READING,-60,1_700_000_005);assert ha.client.published==[]
     ha.on_connect(ha.client,None,None,OK,None)
     assert 'homeassistant/device/ruuvilinux_cbb8334c884f/config' in ha.client.topics()
+
+
+def test_expired_readings_are_never_resent_but_discovery_is():
+    wall=[1_700_000_010.0];ha,clock=publisher(wall=wall,expire_after=300)
+    ha.on_connect(ha.client,None,None,OK,None)
+    ha.publish(READING.mac,'Kitchen',READING,-60,1_700_000_000)
+    assert ha.client.topics()[-1]=='ruuvilinux/cbb8334c884f/state'
+    wall[0]+=600;ha.client.published.clear()
+    # Tag is gone longer than expire_after; birth and reconnect only rediscover.
+    ha.on_message(ha.client,None,SimpleNamespace(topic='homeassistant/status',payload=b'online'))
+    ha.on_disconnect(ha.client,None,None,OK,None);ha.on_connect(ha.client,None,None,OK,None)
+    assert 'ruuvilinux/cbb8334c884f/state' not in ha.client.topics()
+    assert ha.client.topics().count('homeassistant/device/ruuvilinux_cbb8334c884f/config')==2
+    # An old reading arriving late (e.g. retained input) is not published either.
+    ha.client.published.clear();ha.publish('AA:BB:CC:DD:EE:FF','Old',READING,-60,wall[0]-400)
+    assert ha.client.topics()==['homeassistant/device/ruuvilinux_aabbccddeeff/config']
+    # A fresh reading after that publishes normally.
+    ha.publish('AA:BB:CC:DD:EE:FF','Old',READING,-60,wall[0]-1)
+    assert ha.client.topics()[-1]=='ruuvilinux/aabbccddeeff/state'
+
+
+def test_state_is_retained_only_without_expiry():
+    ha,clock=publisher(expire_after=0);ha.on_connect(ha.client,None,None,OK,None)
+    ha.publish(READING.mac,'Kitchen',READING,-60,1_000)  # very old, but expiry is disabled
+    assert ha.client.published[-1][0]=='ruuvilinux/cbb8334c884f/state' and ha.client.published[-1][2] is True
 
 
 def test_rejected_connection_reports_status():
@@ -135,6 +160,8 @@ def test_collector_publishes_accepted_readings_with_saved_names(tmp_path,monkeyp
             store=Store(database);store.rename(READING.mac,'Sauna');store.close()
             MQTT.instance.reading(READING.mac,READING,-55,time.time());await asyncio.sleep(.01)
             MQTT.instance.reading(READING.mac,READING,-50,time.time()-600);await asyncio.sleep(.01)  # stale: not published
+            stamp=Store(database).sensor(READING.mac)['last_seen']
+            MQTT.instance.reading(READING.mac,READING,-45,stamp);await asyncio.sleep(.01)  # retained redelivery: equal stamp
             reader,writer=await asyncio.open_unix_connection(str(path))
             writer.write(b'{"command":"status"}\n');await writer.drain()
             status=json.loads(await reader.readline());writer.close();await writer.wait_closed()
