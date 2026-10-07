@@ -75,7 +75,7 @@ ruuvilinux --mqtt-host broker.example.com --mqtt-port 8883 --mqtt-tls --mqtt-top
 
 The background collector can publish every RuuviTag it receives to [Home Assistant](https://www.home-assistant.io/) using [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery). Each tag appears as one device with temperature, humidity, pressure, battery voltage, signal strength, movement counter and last-seen sensors; acceleration and TX power are added disabled. Your Linux computer's Bluetooth becomes a Ruuvi receiver for Home Assistant, and readings arriving through MQTT input are forwarded the same way.
 
-Home Assistant needs its [MQTT integration](https://www.home-assistant.io/integrations/mqtt/) connected to a broker, for example the Mosquitto add-on or `sudo pacman -S mosquitto`. Create `~/.config/ruuvilinux/collector.env`, readable only by you:
+Home Assistant needs its [MQTT integration](https://www.home-assistant.io/integrations/mqtt/) connected to a broker, for example the Mosquitto add-on or `sudo pacman -S mosquitto`. Create `~/.config/ruuvilinux/collector.env` (under `$XDG_CONFIG_HOME` instead if you set it before installing), readable only by you:
 
 ```sh
 mkdir -p ~/.config/ruuvilinux

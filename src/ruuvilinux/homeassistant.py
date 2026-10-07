@@ -90,6 +90,7 @@ class HomeAssistantPublisher:
         self.client.on_connect = self.on_connect
         self.client.on_connect_fail = lambda c, u: self.status("Home Assistant broker unavailable; retrying…")
         self.client.on_disconnect = self.on_disconnect
+        self.client.on_subscribe = self.on_subscribe
         self.client.on_message = self.on_message
 
     def status(self, message):
@@ -113,6 +114,13 @@ class HomeAssistantPublisher:
             pending = list(self.sensors)
         for identity in pending: self.flush(identity, force=True)
         self.status("Home Assistant · publishing")
+
+    def on_subscribe(self, client, userdata, mid, reasons, properties):
+        # The only subscription is Home Assistant's birth topic; a queued request
+        # is not a grant, the SUBACK carries any ACL rejection.
+        if any(r.is_failure for r in reasons):
+            self.status(f"Home Assistant · publishing, but the broker denied reading {self.settings.status_topic}; "
+                        "allow it so Home Assistant restarts restore readings.")
 
     def on_disconnect(self, client, userdata, flags, reason, properties):
         with self.lock: self.connected = False

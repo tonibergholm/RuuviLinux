@@ -256,3 +256,12 @@ def test_shutdown_racing_connect_still_ends_offline():
     ha.client.subscribe=subscribe
     ha.on_connect(ha.client,None,None,OK,None);stopper[0].join(2)
     assert ha.client.published[-1]==('ruuvilinux/collectors/default/status','offline',True)
+
+
+def test_denied_birth_subscription_reports_actionable_status():
+    statuses=[]
+    ha=HomeAssistantPublisher(HomeAssistantSettings('broker'),statuses.append,client_factory=Client);ha.start()
+    ha.on_connect(ha.client,None,None,OK,None);assert statuses[-1]=='Home Assistant · publishing'
+    ha.on_subscribe(ha.client,None,1,[OK],None);assert statuses[-1]=='Home Assistant · publishing'
+    ha.on_subscribe(ha.client,None,1,[SimpleNamespace(is_failure=True)],None)
+    assert 'denied reading homeassistant/status' in statuses[-1]
