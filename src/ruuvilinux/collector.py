@@ -186,6 +186,7 @@ def main(argv=None):
     ha.add_argument("--ha-interval",type=float,default=env("INTERVAL","60"),help="Minimum seconds between state updates per tag")
     ha.add_argument("--ha-expire-after",type=int,default=env("EXPIRE_AFTER","300"),help="Seconds without readings before entities are unavailable; 0 disables")
     ha.add_argument("--ha-node-id",default=env("NODE_ID"),help="Availability name for this collector (default: hostname and database)")
+    ha.add_argument("--ha-status-topic",default=env("STATUS_TOPIC","homeassistant/status"),help="Home Assistant birth message topic")
     args=parser.parse_args(argv)
     settings=None;ha_settings=None
     if args.mqtt_host:
@@ -195,7 +196,7 @@ def main(argv=None):
     if args.ha_host:
         ha_settings=HomeAssistantSettings(args.ha_host,args.ha_port,args.ha_username,os.environ.get("RUUVILINUX_HA_PASSWORD",""),
             args.ha_tls,args.ha_discovery_prefix,args.ha_base_topic,args.ha_interval,args.ha_expire_after,
-            args.ha_node_id or collector_id(args.database))
+            args.ha_node_id or collector_id(args.database),args.ha_status_topic)
         try: ha_settings.validate()
         except ValueError as error: parser.error(str(error))
     logging.basicConfig(level=logging.INFO,format="%(levelname)s %(message)s")

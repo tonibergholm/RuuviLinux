@@ -16,7 +16,7 @@ OK=SimpleNamespace(is_failure=False)
 
 
 class Client:
-    def __init__(self,*a,**kw):self.published=[];self.events=[];self.will=None;self.locked=[];self.owner=None
+    def __init__(self,*a,**kw):self.published=[];self.events=[];self.will=None;self.locked=[];self.owner=None;self.qos=[]
     def username_pw_set(self,*a):self.events.append('auth')
     def tls_set(self):self.events.append('tls')
     def will_set(self,*a,**kw):self.will=(a,kw)
@@ -25,7 +25,7 @@ class Client:
     def loop_start(self):pass
     def subscribe(self,topic,qos):self.events.append(topic);return 0,1
     def publish(self,topic,payload,qos=0,retain=False):
-        self.published.append((topic,payload,retain));self.locked.append(self.owner.lock.locked() if self.owner else None);return SimpleNamespace(wait_for_publish=lambda t:None)
+        self.published.append((topic,payload,retain));self.locked.append(self.owner.lock.locked() if self.owner else None);self.qos.append(qos);return SimpleNamespace(wait_for_publish=lambda t:None)
     def disconnect(self):self.events.append('disconnect')
     def loop_stop(self):pass
     def topics(self):return [p[0] for p in self.published]
@@ -115,7 +115,37 @@ def test_expired_readings_are_never_resent_but_discovery_is():
 def test_state_is_retained_only_without_expiry():
     ha,clock=publisher(expire_after=0);ha.on_connect(ha.client,None,None,OK,None)
     ha.publish(READING.mac,'Kitchen',READING,-60,1_000)  # very old, but expiry is disabled
-    assert ha.client.published[-1][0]=='ruuvilinux/cbb8334c884f/state' and ha.client.published[-1][2] is True
+    # Retained state has its own topic: enabling expiry later never subscribes to it.
+    assert ha.client.published[-1][0]=='ruuvilinux/cbb8334c884f/state/retained' and ha.client.published[-1][2] is True
+    assert ha.client.qos[-1]==1
+    assert json.loads(ha.client.published[-2][1])['state_topic']=='ruuvilinux/cbb8334c884f/state/retained'
+
+
+def test_expiring_state_uses_qos0_so_paho_never_resends_it():
+    ha,clock=publisher();ha.on_connect(ha.client,None,None,OK,None)
+    ha.publish(READING.mac,'Kitchen',READING,-60,1_700_000_000)
+    topics=ha.client.topics()
+    assert ha.client.qos[topics.index('ruuvilinux/cbb8334c884f/state')]==0
+    assert ha.client.qos[topics.index('homeassistant/device/ruuvilinux_cbb8334c884f/config')]==1
+
+
+def test_birth_topic_is_configured_separately_from_discovery_prefix():
+    ha,clock=publisher(discovery_prefix='custom',status_topic='homeassistant/status')
+    ha.on_connect(ha.client,None,None,OK,None)
+    assert 'homeassistant/status' in ha.client.events and 'custom/status' not in ha.client.events
+    ha.publish(READING.mac,'Kitchen',READING,-60,1_700_000_000);ha.client.published.clear()
+    ha.on_message(ha.client,None,SimpleNamespace(topic='custom/status',payload=b'online'))
+    assert ha.client.published==[]
+    ha.on_message(ha.client,None,SimpleNamespace(topic='homeassistant/status',payload=b'online'))
+    assert ha.client.topics()==['custom/device/ruuvilinux_cbb8334c884f/config','ruuvilinux/cbb8334c884f/state']
+
+
+def test_connect_after_shutdown_never_publishes_online_or_state():
+    ha,clock=publisher();ha.publish(READING.mac,'Kitchen',READING,-60,1_700_000_000)
+    ha.stop()  # not yet connected: no offline publish needed
+    ha.on_connect(ha.client,None,None,OK,None)  # connect callback that lost the race
+    ha.flush(READING.mac,force=True)
+    assert ha.client.published==[] and not ha.connected
 
 
 def test_interval_may_equal_half_expiry_or_ignore_disabled_expiry():
@@ -151,7 +181,8 @@ def test_rejected_connection_reports_status():
 
 @pytest.mark.parametrize('changes',[{'host':''},{'host':'mqtt://x'},{'port':0},{'discovery_prefix':'a/#'},
     {'base_topic':''},{'base_topic':'x/'},{'interval':-1},{'expire_after':-5},
-    {'interval':200},{'interval':60,'expire_after':100},{'node_id':''},{'node_id':'a/b'},{'node_id':'#'}])
+    {'interval':200},{'interval':60,'expire_after':100},{'node_id':''},{'node_id':'a/b'},{'node_id':'#'},
+    {'status_topic':''},{'status_topic':'ha/#'}])
 def test_invalid_settings(changes):
     with pytest.raises(ValueError):HomeAssistantSettings(**({'host':'broker'}|changes)).validate()
     assert 'password' not in HomeAssistantSettings('b',password='secret').public()
@@ -213,3 +244,15 @@ def test_settings_from_environment_file_variables(monkeypatch):
     settings=captured['settings']
     assert (settings.host,settings.port,settings.username,settings.password,settings.tls,settings.interval)==('ha.local',8883,'ruuvi','secret',True,15)
     assert collector.main(['--ha-port','1883'])==0 and captured['settings'].port==1883
+
+
+def test_shutdown_racing_connect_still_ends_offline():
+    import threading
+    ha,clock=publisher();stopper=[]
+    def subscribe(topic,qos):
+        # Shutdown starts on another thread while the connect callback is mid-way.
+        thread=threading.Thread(target=ha.stop);thread.start();stopper.append(thread)
+        thread.join(.2);return 0,1
+    ha.client.subscribe=subscribe
+    ha.on_connect(ha.client,None,None,OK,None);stopper[0].join(2)
+    assert ha.client.published[-1]==('ruuvilinux/collectors/default/status','offline',True)

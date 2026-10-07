@@ -52,11 +52,12 @@ class HomeAssistantSettings:
     interval: float = 60
     expire_after: int = 300
     node_id: str = "default"
+    status_topic: str = "homeassistant/status"  # Home Assistant's birth topic, configured separately from discovery
 
     def validate(self):
         if not self.host.strip() or "://" in self.host or not 1 <= self.port <= 65535:
             raise ValueError("Enter a Home Assistant broker hostname and a port between 1 and 65535.")
-        for topic in (self.discovery_prefix, self.base_topic):
+        for topic in (self.discovery_prefix, self.base_topic, self.status_topic):
             if not topic or any(c in topic for c in "+#\0") or topic.startswith("/") or topic.endswith("/"):
                 raise ValueError("Home Assistant topics need plain levels without wildcards.")
         if not 0 <= self.interval <= 3600:
@@ -100,12 +101,13 @@ class HomeAssistantPublisher:
         self.client.loop_start()
 
     def on_connect(self, client, userdata, flags, reason, properties):
-        if not self.running: return
-        if reason.is_failure:
-            self.status("Home Assistant MQTT rejected; check credentials and broker permissions."); return
-        client.subscribe(self.settings.discovery_prefix + "/status", qos=1)
-        client.publish(self.availability, "online", qos=1, retain=True)
         with self.lock:
+            # Shares the lock with stop(), so "online" can never follow a clean shutdown.
+            if not self.running: return
+            if reason.is_failure:
+                self.status("Home Assistant MQTT rejected; check credentials and broker permissions."); return
+            client.subscribe(self.settings.status_topic, qos=1)
+            client.publish(self.availability, "online", qos=1, retain=True)
             self.connected = True
             for sensor in self.sensors.values(): sensor["announced"] = None
             pending = list(self.sensors)
@@ -118,7 +120,7 @@ class HomeAssistantPublisher:
 
     def on_message(self, client, userdata, message):
         # Home Assistant's birth message: rediscover after it restarts.
-        if message.topic == self.settings.discovery_prefix + "/status" and message.payload == b"online":
+        if message.topic == self.settings.status_topic and message.payload == b"online":
             with self.lock:
                 for sensor in self.sensors.values(): sensor["announced"] = None
                 pending = list(self.sensors)
@@ -136,7 +138,7 @@ class HomeAssistantPublisher:
     def flush(self, identity, force=False):
         with self.lock:
             sensor = self.sensors.get(identity)
-            if not self.connected or not sensor or sensor["state"] is None: return
+            if not self.running or not self.connected or not sensor or sensor["state"] is None: return
             announce = sensor["announced"] != sensor["name"]
             # Home Assistant restarts expire_after on every message, so an
             # expired reading must never be resent (reconnect, birth or late input).
@@ -152,15 +154,20 @@ class HomeAssistantPublisher:
             if announce:
                 self.client.publish(self.discovery_topic(identity), json.dumps(self.discovery(identity, sensor["name"])), qos=1, retain=True)
             if due:
-                # Retained state would revive expired sensors when replayed, so it is
-                # only retained when expiry is disabled. Birth messages resend it instead.
-                self.client.publish(self.state_topic(identity), json.dumps(sensor["state"], allow_nan=False), qos=1, retain=not expiry)
+                # Expiring state is neither retained nor QoS 1: a broker replay or paho's
+                # own resend after reconnect would revive expired sensors. Birth messages
+                # resend current state instead.
+                self.client.publish(self.state_topic(identity), json.dumps(sensor["state"], allow_nan=False),
+                                    qos=0 if expiry else 1, retain=not expiry)
 
     def discovery_topic(self, identity):
         return f"{self.settings.discovery_prefix}/device/ruuvilinux_{topic_id(identity)}/config"
 
     def state_topic(self, identity):
-        return f"{self.settings.base_topic}/{topic_id(identity)}/state"
+        # Retained state lives on its own topic, so turning expiry on later never
+        # subscribes Home Assistant to a stale retained reading.
+        suffix = "" if self.settings.expire_after else "/retained"
+        return f"{self.settings.base_topic}/{topic_id(identity)}/state{suffix}"
 
     def discovery(self, identity, name):
         compact = topic_id(identity)
@@ -188,10 +195,12 @@ class HomeAssistantPublisher:
                 "availability_topic": self.availability, "qos": 1}
 
     def stop(self):
-        if not self.running: return
-        self.running = False
+        with self.lock:
+            if not self.running: return
+            self.running = False
+            offline = self.client.publish(self.availability, "offline", qos=1, retain=True) if self.connected else None
         try:
-            if self.connected: self.client.publish(self.availability, "offline", qos=1, retain=True).wait_for_publish(2)
+            if offline: offline.wait_for_publish(2)
         except (RuntimeError, ValueError): pass
         self.client.disconnect()
         threading.Thread(target=self.client.loop_stop, daemon=True).start()

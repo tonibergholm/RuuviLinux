@@ -19,12 +19,12 @@ def test_collector_publishes_discovery_state_and_availability(tmp_path,monkeypat
     def message(client,userdata,msg):
         with lock: received[msg.topic]=msg.payload
     watcher=mqtt.Client(mqtt.CallbackAPIVersion.VERSION2);watcher.on_message=message
-    watcher.connect('127.0.0.1',port);watcher.subscribe([(prefix+'/#',1),(base+'/#',1)]);watcher.loop_start()
+    watcher.connect('127.0.0.1',port);watcher.subscribe([(prefix+'/#',1),(base+'/#',1),(prefix+'-birth/#',1)]);watcher.loop_start()
     with tempfile.TemporaryDirectory(prefix='ruuvi-',dir='/tmp') as runtime:
         monkeypatch.setenv('XDG_RUNTIME_DIR',runtime)
         process=subprocess.Popen([sys.executable,'-m','ruuvilinux.collector','--database',str(database),
             '--mqtt-host','127.0.0.1','--mqtt-port',str(port),'--mqtt-topic',base+'-input/#',
-            '--ha-host','127.0.0.1','--ha-port',str(port),'--ha-discovery-prefix',prefix,'--ha-base-topic',base,'--ha-node-id','test-node'],
+            '--ha-host','127.0.0.1','--ha-port',str(port),'--ha-discovery-prefix',prefix,'--ha-base-topic',base,'--ha-node-id','test-node','--ha-status-topic',prefix+'-birth/status'],
             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         def wait(predicate):
             deadline=time.monotonic()+8
@@ -44,7 +44,7 @@ def test_collector_publishes_discovery_state_and_availability(tmp_path,monkeypat
             assert json.loads(received[state])['temperature']==24.3
             # A Home Assistant restart (birth message) republishes discovery.
             del received[config]
-            watcher.publish(prefix+'/status','online',qos=1).wait_for_publish(5)
+            watcher.publish(prefix+'-birth/status','online',qos=1).wait_for_publish(5)
             wait(lambda:config in received)
         finally:
             process.terminate();process.wait(timeout=10)
