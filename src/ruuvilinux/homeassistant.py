@@ -4,8 +4,11 @@ Each RuuviTag becomes one Home Assistant device through device-based discovery:
 https://www.home-assistant.io/integrations/mqtt/#device-discovery-payload
 """
 from dataclasses import asdict, dataclass
+import hashlib
 import json
+from pathlib import Path
 import re
+import socket
 import threading
 import time
 import uuid
@@ -31,6 +34,12 @@ def topic_id(identity):
     return re.sub(r"[^0-9a-z]", "", identity.lower()) or "unknown"
 
 
+def collector_id(database):
+    """Stable per-collector name, so collectors sharing a broker keep separate availability."""
+    host = re.sub(r"[^0-9a-z_-]", "", socket.gethostname().lower())[:40] or "host"
+    return host + "_" + hashlib.sha256(str(Path(database).expanduser().resolve()).encode()).hexdigest()[:8]
+
+
 @dataclass
 class HomeAssistantSettings:
     host: str
@@ -42,6 +51,7 @@ class HomeAssistantSettings:
     base_topic: str = "ruuvilinux"
     interval: float = 60
     expire_after: int = 300
+    node_id: str = "default"
 
     def validate(self):
         if not self.host.strip() or "://" in self.host or not 1 <= self.port <= 65535:
@@ -53,6 +63,11 @@ class HomeAssistantSettings:
             raise ValueError("Home Assistant publish interval must be 0–3600 seconds.")
         if not 0 <= self.expire_after <= 86400:
             raise ValueError("Home Assistant expiry must be 0–86400 seconds.")
+        # Expiry restarts on each received state; leave room for radio gaps.
+        if self.expire_after and self.interval * 2 > self.expire_after:
+            raise ValueError("Home Assistant expiry must be at least twice the publish interval.")
+        if not re.fullmatch(r"[0-9A-Za-z_-]{1,64}", self.node_id):
+            raise ValueError("Home Assistant node ID may use letters, digits, - and _.")
 
     def public(self):
         return {k: v for k, v in asdict(self).items() if k != "password"}
@@ -64,7 +79,7 @@ class HomeAssistantPublisher:
         settings.validate(); self.settings = settings; self.on_status = on_status; self.clock = clock; self.wall = wall
         self.running = False; self.connected = False; self.lock = threading.Lock()
         self.sensors = {}  # identity -> {"name", "state", "announced", "sent"}
-        self.availability = f"{settings.base_topic}/collector/status"
+        self.availability = f"{settings.base_topic}/collectors/{settings.node_id}/status"
         self.client = client_factory(mqtt.CallbackAPIVersion.VERSION2, client_id="ruuvilinux-ha-" + uuid.uuid4().hex,
                                      protocol=mqtt.MQTTv311)
         if settings.username: self.client.username_pw_set(settings.username, settings.password)
@@ -132,13 +147,14 @@ class HomeAssistantPublisher:
             if not (due or announce): return
             if due: sensor["sent"] = now
             if announce: sensor["announced"] = sensor["name"]
-            name, state = sensor["name"], dict(sensor["state"])
-        if announce:
-            self.client.publish(self.discovery_topic(identity), json.dumps(self.discovery(identity, name)), qos=1, retain=True)
-        if due:
-            # Retained state would revive expired sensors when replayed, so it is
-            # only retained when expiry is disabled. Birth messages resend it instead.
-            self.client.publish(self.state_topic(identity), json.dumps(state, allow_nan=False), qos=1, retain=not expiry)
+            # Publish under the lock: paho only queues here, and concurrent flushes
+            # (collector thread vs. reconnect/birth on paho's thread) stay in order.
+            if announce:
+                self.client.publish(self.discovery_topic(identity), json.dumps(self.discovery(identity, sensor["name"])), qos=1, retain=True)
+            if due:
+                # Retained state would revive expired sensors when replayed, so it is
+                # only retained when expiry is disabled. Birth messages resend it instead.
+                self.client.publish(self.state_topic(identity), json.dumps(sensor["state"], allow_nan=False), qos=1, retain=not expiry)
 
     def discovery_topic(self, identity):
         return f"{self.settings.discovery_prefix}/device/ruuvilinux_{topic_id(identity)}/config"
@@ -162,6 +178,7 @@ class HomeAssistantPublisher:
         components["last_seen"] = {"platform": "sensor", "name": "Last seen", "unique_id": f"ruuvilinux_{compact}_last_seen",
                                    "device_class": "timestamp", "entity_category": "diagnostic",
                                    "value_template": "{{ value_json.last_seen }}"}
+        if self.settings.expire_after: components["last_seen"]["expire_after"] = self.settings.expire_after
         device = {"identifiers": [f"ruuvilinux_{compact}"], "name": name, "manufacturer": "Ruuvi Innovations",
                   "model": "RuuviTag (RAWv2)"}
         if re.fullmatch(r"([0-9A-F]{2}:){5}[0-9A-F]{2}", identity): device["connections"] = [["bluetooth", identity.lower()]]

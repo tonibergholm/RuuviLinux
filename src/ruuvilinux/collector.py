@@ -11,7 +11,7 @@ import sqlite3
 import time
 from bleak import BleakScanner
 from .collector_client import control_path
-from .homeassistant import HomeAssistantPublisher, HomeAssistantSettings
+from .homeassistant import HomeAssistantPublisher, HomeAssistantSettings, collector_id
 from .mqtt_backend import MQTTSettings, MQTTTransport
 from .protocol import decode_advertisement
 from .storage import Store, data_path
@@ -185,6 +185,7 @@ def main(argv=None):
     ha.add_argument("--ha-base-topic",default=env("BASE_TOPIC","ruuvilinux"))
     ha.add_argument("--ha-interval",type=float,default=env("INTERVAL","60"),help="Minimum seconds between state updates per tag")
     ha.add_argument("--ha-expire-after",type=int,default=env("EXPIRE_AFTER","300"),help="Seconds without readings before entities are unavailable; 0 disables")
+    ha.add_argument("--ha-node-id",default=env("NODE_ID"),help="Availability name for this collector (default: hostname and database)")
     args=parser.parse_args(argv)
     settings=None;ha_settings=None
     if args.mqtt_host:
@@ -193,7 +194,8 @@ def main(argv=None):
         except ValueError as error: parser.error(str(error))
     if args.ha_host:
         ha_settings=HomeAssistantSettings(args.ha_host,args.ha_port,args.ha_username,os.environ.get("RUUVILINUX_HA_PASSWORD",""),
-            args.ha_tls,args.ha_discovery_prefix,args.ha_base_topic,args.ha_interval,args.ha_expire_after)
+            args.ha_tls,args.ha_discovery_prefix,args.ha_base_topic,args.ha_interval,args.ha_expire_after,
+            args.ha_node_id or collector_id(args.database))
         try: ha_settings.validate()
         except ValueError as error: parser.error(str(error))
     logging.basicConfig(level=logging.INFO,format="%(levelname)s %(message)s")

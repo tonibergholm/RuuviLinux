@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from ruuvilinux.collector import Collector, main as collector_main
 from ruuvilinux.collector_client import control_path
-from ruuvilinux.homeassistant import HomeAssistantPublisher, HomeAssistantSettings
+from ruuvilinux.homeassistant import HomeAssistantPublisher, HomeAssistantSettings, collector_id
 from ruuvilinux.protocol import decode_rawv2
 from ruuvilinux.storage import Store
 
@@ -16,7 +16,7 @@ OK=SimpleNamespace(is_failure=False)
 
 
 class Client:
-    def __init__(self,*a,**kw):self.published=[];self.events=[];self.will=None
+    def __init__(self,*a,**kw):self.published=[];self.events=[];self.will=None;self.locked=[];self.owner=None
     def username_pw_set(self,*a):self.events.append('auth')
     def tls_set(self):self.events.append('tls')
     def will_set(self,*a,**kw):self.will=(a,kw)
@@ -25,7 +25,7 @@ class Client:
     def loop_start(self):pass
     def subscribe(self,topic,qos):self.events.append(topic);return 0,1
     def publish(self,topic,payload,qos=0,retain=False):
-        self.published.append((topic,payload,retain));return SimpleNamespace(wait_for_publish=lambda t:None)
+        self.published.append((topic,payload,retain));self.locked.append(self.owner.lock.locked() if self.owner else None);return SimpleNamespace(wait_for_publish=lambda t:None)
     def disconnect(self):self.events.append('disconnect')
     def loop_stop(self):pass
     def topics(self):return [p[0] for p in self.published]
@@ -34,35 +34,36 @@ class Client:
 def publisher(wall=None,**changes):
     clock=[1000.0];wall=wall or [1_700_000_010.0]
     ha=HomeAssistantPublisher(HomeAssistantSettings('broker',**changes),client_factory=Client,clock=lambda:clock[0],wall=lambda:wall[0])
-    ha.start();return ha,clock
+    ha.client.owner=ha;ha.start();return ha,clock
 
 
 def test_discovery_waits_for_connection_and_describes_device():
     ha,clock=publisher(username='u',password='p',tls=True)
-    assert ha.client.will==(('ruuvilinux/collector/status','offline'),{'qos':1,'retain':True})
+    assert ha.client.will==(('ruuvilinux/collectors/default/status','offline'),{'qos':1,'retain':True})
     assert 'auth' in ha.client.events and 'tls' in ha.client.events
     ha.publish(READING.mac,'Kitchen',READING,-60,1_700_000_000)
     assert ha.client.published==[]  # queued until the broker accepts the connection
     ha.on_connect(ha.client,None,None,OK,None)
     assert 'homeassistant/status' in ha.client.events
     topics=ha.client.topics()
-    assert topics==['ruuvilinux/collector/status','homeassistant/device/ruuvilinux_cbb8334c884f/config','ruuvilinux/cbb8334c884f/state']
+    assert topics==['ruuvilinux/collectors/default/status','homeassistant/device/ruuvilinux_cbb8334c884f/config','ruuvilinux/cbb8334c884f/state']
     assert [retain for _,_,retain in ha.client.published]==[True,True,False]  # expiring state is not retained
     config=json.loads(ha.client.published[1][1])
     assert config['device']['name']=='Kitchen' and config['device']['connections']==[['bluetooth','cb:b8:33:4c:88:4f']]
-    assert config['origin']['name']=='RuuviLinux' and config['availability_topic']=='ruuvilinux/collector/status'
+    assert config['origin']['name']=='RuuviLinux' and config['availability_topic']=='ruuvilinux/collectors/default/status'
     temperature=config['components']['temperature']
     assert temperature['platform']=='sensor' and temperature['device_class']=='temperature'
     assert temperature['unit_of_measurement']=='°C' and temperature['value_template']=='{{ value_json.temperature }}'
     assert temperature['unique_id']=='ruuvilinux_cbb8334c884f_temperature' and temperature['expire_after']==300
     assert config['components']['pressure']['device_class']=='atmospheric_pressure'
     assert config['components']['acceleration_x']['enabled_by_default'] is False
+    assert all(c['expire_after']==300 for c in config['components'].values())  # including Last seen
     assert len({c['unique_id'] for c in config['components'].values()})==len(config['components'])
     state=json.loads(ha.client.published[2][1])
     assert state['temperature']==24.3 and state['pressure']==1000.44 and state['rssi']==-60
     assert state['last_seen']=='2023-11-14T22:13:20+00:00' and 'mac' not in state
     ha.stop()
-    assert ha.client.published[-1]==('ruuvilinux/collector/status','offline',True)
+    assert ha.client.published[-1]==('ruuvilinux/collectors/default/status','offline',True)
 
 
 def test_state_is_throttled_rename_rediscovers_and_stale_is_ignored():
@@ -117,6 +118,30 @@ def test_state_is_retained_only_without_expiry():
     assert ha.client.published[-1][0]=='ruuvilinux/cbb8334c884f/state' and ha.client.published[-1][2] is True
 
 
+def test_interval_may_equal_half_expiry_or_ignore_disabled_expiry():
+    HomeAssistantSettings('broker',interval=150,expire_after=300).validate()
+    HomeAssistantSettings('broker',interval=3600,expire_after=0).validate()
+
+
+def test_collectors_have_distinct_stable_availability_topics(tmp_path):
+    first,second=collector_id(tmp_path/'a.db'),collector_id(tmp_path/'b.db')
+    assert first!=second and first==collector_id(tmp_path/'a.db')
+    HomeAssistantSettings('broker',node_id=first).validate()
+    ha=HomeAssistantPublisher(HomeAssistantSettings('broker',node_id=first),client_factory=Client)
+    assert ha.availability=='ruuvilinux/collectors/'+first+'/status' and ha.client.will[0][0]==ha.availability
+    assert ha.discovery('CB:B8:33:4C:88:4F','Kitchen')['availability_topic']==ha.availability
+
+
+def test_publishes_are_serialized_with_their_snapshot():
+    ha,clock=publisher();ha.on_connect(ha.client,None,None,OK,None)
+    ha.publish(READING.mac,'Kitchen',READING,-60,1_700_000_000)
+    ha.on_message(ha.client,None,SimpleNamespace(topic='homeassistant/status',payload=b'online'))
+    clock[0]+=1;ha.publish(READING.mac,'Sauna',READING,-60,1_700_000_001)
+    # Discovery and state go out while the lock that chose their snapshot is held.
+    flushed=[locked for (topic,_,_),locked in zip(ha.client.published,ha.client.locked) if not topic.endswith('/status')]
+    assert len(flushed)==6 and all(flushed)
+
+
 def test_rejected_connection_reports_status():
     statuses=[]
     ha=HomeAssistantPublisher(HomeAssistantSettings('broker'),statuses.append,client_factory=Client);ha.start()
@@ -125,7 +150,8 @@ def test_rejected_connection_reports_status():
 
 
 @pytest.mark.parametrize('changes',[{'host':''},{'host':'mqtt://x'},{'port':0},{'discovery_prefix':'a/#'},
-    {'base_topic':''},{'base_topic':'x/'},{'interval':-1},{'expire_after':-5}])
+    {'base_topic':''},{'base_topic':'x/'},{'interval':-1},{'expire_after':-5},
+    {'interval':200},{'interval':60,'expire_after':100},{'node_id':''},{'node_id':'a/b'},{'node_id':'#'}])
 def test_invalid_settings(changes):
     with pytest.raises(ValueError):HomeAssistantSettings(**({'host':'broker'}|changes)).validate()
     assert 'password' not in HomeAssistantSettings('b',password='secret').public()

@@ -24,7 +24,7 @@ def test_collector_publishes_discovery_state_and_availability(tmp_path,monkeypat
         monkeypatch.setenv('XDG_RUNTIME_DIR',runtime)
         process=subprocess.Popen([sys.executable,'-m','ruuvilinux.collector','--database',str(database),
             '--mqtt-host','127.0.0.1','--mqtt-port',str(port),'--mqtt-topic',base+'-input/#',
-            '--ha-host','127.0.0.1','--ha-port',str(port),'--ha-discovery-prefix',prefix,'--ha-base-topic',base],
+            '--ha-host','127.0.0.1','--ha-port',str(port),'--ha-discovery-prefix',prefix,'--ha-base-topic',base,'--ha-node-id','test-node'],
             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         def wait(predicate):
             deadline=time.monotonic()+8
@@ -35,7 +35,7 @@ def test_collector_publishes_discovery_state_and_availability(tmp_path,monkeypat
         try:
             wait(lambda:control_path(database).exists())
             wait(lambda:'subscribed' in request(database)['status'] and request(database)['homeassistant']['status']=='Home Assistant · publishing')
-            assert received.get(base+'/collector/status')==b'online'
+            assert received.get(base+'/collectors/test-node/status')==b'online'
             payload={'data':'0201061BFF99040512FC5394C37C0004FFFC040CAC364200CDCBB8334C884F','ts':time.time()-5,'rssi':-60}
             watcher.publish(base+'-input/tag',json.dumps(payload),qos=1).wait_for_publish(5)
             wait(lambda:config in received and state in received)
@@ -48,8 +48,8 @@ def test_collector_publishes_discovery_state_and_availability(tmp_path,monkeypat
             wait(lambda:config in received)
         finally:
             process.terminate();process.wait(timeout=10)
-        wait(lambda:received.get(base+'/collector/status')==b'offline')
+        wait(lambda:received.get(base+'/collectors/test-node/status')==b'offline')
         assert process.returncode==0
-        for topic in (config,state,base+'/collector/status'):  # clear retained test messages
+        for topic in (config,state,base+'/collectors/test-node/status'):  # clear retained test messages
             watcher.publish(topic,b'',qos=1,retain=True).wait_for_publish(5)
         watcher.disconnect();watcher.loop_stop()
